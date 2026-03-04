@@ -10,7 +10,7 @@ inside a CPU, step by step and cycle by cycle.
 
 ## Architecture Overview
 
-![Arch-Reactor Architecture](docs/architecture.png)
+![Arch-Reactor Architecture](architecture.png)
 
 ---
 
