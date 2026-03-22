@@ -1,0 +1,35 @@
+# Python 캐시 - 실행 시 자동 생성되는 바이트코드 파일들
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 패키지 빌드 결과물 - pip install -e . 할 때 생성됨
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# 가상환경 - 로컬 개발용이라 각자 환경이 다름
+venv/
+.venv/
+env/
+
+# IDE 설정 - 개인 에디터 설정은 공유 불필요
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 환경변수 - 실제 .env에는 민감 정보가 들어갈 수 있음 (.env.example만 커밋)
+.env
+
+# 테스트 결과물 - pytest 실행 시 자동 생성
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS 자동 생성 파일
+.DS_Store
+Thumbs.db
