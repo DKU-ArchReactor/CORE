@@ -19,5 +19,19 @@ def memory_access(dmem: list, decoded: dict, alu_result: int, rs2_val: int) -> i
     Returns:
         int | None: Load 시 읽은 값, Store나 메모리 미접근 시 None
     """
-    # TODO: lw, sw 등 메모리 접근 구현
-    pass
+    if decoded["mem_read"]:
+        # lw: word 단위 주소 (4바이트 정렬)
+        addr = alu_result // 4
+        if addr < 0 or addr >= len(dmem):
+            raise IndexError(f"메모리 읽기 범위 초과: addr={alu_result} (index={addr})")
+        return dmem[addr]
+
+    if decoded["mem_write"]:
+        # sw: word 단위 주소 (4바이트 정렬)
+        addr = alu_result // 4
+        if addr < 0 or addr >= len(dmem):
+            raise IndexError(f"메모리 쓰기 범위 초과: addr={alu_result} (index={addr})")
+        dmem[addr] = rs2_val
+        return None
+
+    return None
