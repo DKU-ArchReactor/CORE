@@ -1,99 +1,121 @@
 """
 ALU 실행 모듈.
 
-디코딩된 명령어의 연산을 수행한다.
-Non-Pipeline의 EX 단계에 해당하며, Pipeline 확장 시 stage_ex()에서도 재사용한다.
+디코딩된 명령어의 연산을 수행한다. RV32I + RV32M을 지원하고
+32비트 signed wrapping을 보장한다.
 """
 
-# 32비트 마스크
+from __future__ import annotations
+
 _MASK32 = 0xFFFFFFFF
+_SIGN_BIT = 1 << 31
 
 
-def _to_signed(val: int) -> int:
-    """32비트 unsigned → signed 변환."""
-    val &= _MASK32
-    return val - (1 << 32) if val >= (1 << 31) else val
+def _to_u32(value: int) -> int:
+    return value & _MASK32
 
 
-def execute(op: str, val1: int, val2: int, imm: int) -> int:
-    """
-    ALU 연산을 수행한다.
+def _to_s32(value: int) -> int:
+    value &= _MASK32
+    return value - (1 << 32) if value & _SIGN_BIT else value
 
-    Args:
-        op: 연산 종류 (add, sub, and, or, slt 등)
-        val1: rs1 레지스터 값
-        val2: rs2 레지스터 값
-        imm: 즉시값 (I-type 명령어용)
 
-    Returns:
-        int: 연산 결과
-    """
-    # R-type 연산
+def execute(decoded: dict, rs1_val: int, rs2_val: int) -> dict:
+    op = decoded["op"]
+    imm = decoded.get("imm", 0)
+
     if op == "add":
-        return _to_signed(val1 + val2)
-    if op == "sub":
-        return _to_signed(val1 - val2)
-    if op == "and":
-        return val1 & val2
-    if op == "or":
-        return val1 | val2
-    if op == "xor":
-        return val1 ^ val2
-    if op == "sll":
-        return _to_signed(val1 << (val2 & 0x1F))
-    if op == "srl":
-        return (val1 & _MASK32) >> (val2 & 0x1F)
-    if op == "sra":
-        return _to_signed(val1) >> (val2 & 0x1F)
-    if op == "slt":
-        return 1 if _to_signed(val1) < _to_signed(val2) else 0
-    if op == "sltu":
-        return 1 if (val1 & _MASK32) < (val2 & _MASK32) else 0
+        result = _to_s32(rs1_val + rs2_val)
+    elif op == "sub":
+        result = _to_s32(rs1_val - rs2_val)
+    elif op == "and":
+        result = _to_u32(rs1_val & rs2_val)
+    elif op == "or":
+        result = _to_u32(rs1_val | rs2_val)
+    elif op == "xor":
+        result = _to_u32(rs1_val ^ rs2_val)
+    elif op == "sll":
+        result = _to_s32(_to_u32(rs1_val) << (rs2_val & 0x1F))
+    elif op == "srl":
+        result = _to_u32(_to_u32(rs1_val) >> (rs2_val & 0x1F))
+    elif op == "sra":
+        result = _to_s32(_to_s32(rs1_val) >> (rs2_val & 0x1F))
+    elif op == "slt":
+        result = 1 if _to_s32(rs1_val) < _to_s32(rs2_val) else 0
+    elif op == "sltu":
+        result = 1 if _to_u32(rs1_val) < _to_u32(rs2_val) else 0
+    elif op == "addi":
+        result = _to_s32(rs1_val + imm)
+    elif op == "andi":
+        result = _to_u32(rs1_val & imm)
+    elif op == "ori":
+        result = _to_u32(rs1_val | imm)
+    elif op == "xori":
+        result = _to_u32(rs1_val ^ imm)
+    elif op == "slti":
+        result = 1 if _to_s32(rs1_val) < _to_s32(imm) else 0
+    elif op == "sltiu":
+        result = 1 if _to_u32(rs1_val) < _to_u32(imm) else 0
+    elif op == "slli":
+        result = _to_s32(_to_u32(rs1_val) << (imm & 0x1F))
+    elif op == "srli":
+        result = _to_u32(_to_u32(rs1_val) >> (imm & 0x1F))
+    elif op == "srai":
+        result = _to_s32(_to_s32(rs1_val) >> (imm & 0x1F))
+    elif op in ("lw", "sw"):
+        result = _to_s32(rs1_val + imm)
+    elif op == "lui":
+        result = _to_s32(imm)
+    elif op == "auipc":
+        result = _to_s32(rs1_val + imm)
+    elif op in ("jal", "jalr"):
+        result = 0
+    elif op == "beq":
+        result = 1 if rs1_val == rs2_val else 0
+    elif op == "bne":
+        result = 1 if rs1_val != rs2_val else 0
+    elif op == "blt":
+        result = 1 if _to_s32(rs1_val) < _to_s32(rs2_val) else 0
+    elif op == "bge":
+        result = 1 if _to_s32(rs1_val) >= _to_s32(rs2_val) else 0
+    elif op == "bltu":
+        result = 1 if _to_u32(rs1_val) < _to_u32(rs2_val) else 0
+    elif op == "bgeu":
+        result = 1 if _to_u32(rs1_val) >= _to_u32(rs2_val) else 0
+    elif op == "mul":
+        result = _to_s32(_to_s32(rs1_val) * _to_s32(rs2_val))
+    elif op == "mulh":
+        product = _to_s32(rs1_val) * _to_s32(rs2_val)
+        result = _to_s32((product >> 32) & _MASK32)
+    elif op == "div":
+        dividend = _to_s32(rs1_val)
+        divisor = _to_s32(rs2_val)
+        result = 0 if divisor == 0 else _to_s32(int(dividend / divisor))
+    elif op == "divu":
+        dividend = _to_u32(rs1_val)
+        divisor = _to_u32(rs2_val)
+        result = 0 if divisor == 0 else _to_u32(dividend // divisor)
+    elif op == "rem":
+        dividend = _to_s32(rs1_val)
+        divisor = _to_s32(rs2_val)
+        if divisor == 0:
+            result = 0
+        else:
+            quotient = int(dividend / divisor)
+            result = _to_s32(dividend - quotient * divisor)
+    elif op == "remu":
+        dividend = _to_u32(rs1_val)
+        divisor = _to_u32(rs2_val)
+        result = 0 if divisor == 0 else _to_u32(dividend % divisor)
+    elif op == "ecall":
+        result = 0
+    else:
+        raise ValueError(f"ALU: 지원하지 않는 연산: {op}")
 
-    # I-type 산술 연산
-    if op == "addi":
-        return _to_signed(val1 + imm)
-    if op == "andi":
-        return val1 & imm
-    if op == "ori":
-        return val1 | imm
-    if op == "xori":
-        return val1 ^ imm
-    if op == "slti":
-        return 1 if _to_signed(val1) < _to_signed(imm) else 0
-    if op == "sltiu":
-        return 1 if (val1 & _MASK32) < (imm & _MASK32) else 0
-    if op == "slli":
-        return _to_signed(val1 << (imm & 0x1F))
-    if op == "srli":
-        return (val1 & _MASK32) >> (imm & 0x1F)
-    if op == "srai":
-        return _to_signed(val1) >> (imm & 0x1F)
-
-    # Load/Store: 주소 계산 (base + offset)
-    if op in ("lw", "sw"):
-        return _to_signed(val1 + imm)
-
-    # lui: 상위 20비트 로드
-    if op == "lui":
-        return _to_signed(imm << 12)
-
-    # jal / jalr: 주소 계산은 simulator에서 처리, ALU는 0 반환
-    if op in ("jal", "jalr"):
-        return 0
-
-    # Branch: 비교 결과 반환 (1=taken, 0=not taken)
-    if op == "beq":
-        return 1 if val1 == val2 else 0
-    if op == "bne":
-        return 1 if val1 != val2 else 0
-    if op == "blt":
-        return 1 if _to_signed(val1) < _to_signed(val2) else 0
-    if op == "bge":
-        return 1 if _to_signed(val1) >= _to_signed(val2) else 0
-    if op == "bltu":
-        return 1 if (val1 & _MASK32) < (val2 & _MASK32) else 0
-    if op == "bgeu":
-        return 1 if (val1 & _MASK32) >= (val2 & _MASK32) else 0
-
-    raise ValueError(f"ALU: 지원하지 않는 연산: {op}")
+    operand2 = 0 if op == "ecall" else _to_u32(rs2_val if op not in ("addi", "andi", "ori", "xori", "slti", "sltiu", "slli", "srli", "srai", "lw", "sw", "lui", "auipc") else imm)
+    return {
+        "alu_result": result,
+        "alu_op": op,
+        "operand1": _to_u32(rs1_val),
+        "operand2": operand2,
+    }

@@ -1,132 +1,206 @@
 """
 명령어 디코더 모듈.
 
-어셈블리 문자열을 파싱하여 opcode, 레지스터 번호, 즉시값 등을 추출한다.
-Non-Pipeline의 ID 단계에 해당하며, Pipeline 확장 시 stage_id()에서도 재사용한다.
+ELF raw machine code 32비트 워드를 해석하여 RV32IM 명령어 필드를 반환한다.
 """
 
-# 레지스터 이름 → 번호 매핑 (x0~x31 및 ABI 이름)
-_REG_MAP = {f"x{i}": i for i in range(32)}
-_REG_MAP.update({
-    "zero": 0, "ra": 1, "sp": 2, "gp": 3, "tp": 4,
-    "t0": 5, "t1": 6, "t2": 7,
-    "s0": 8, "fp": 8, "s1": 9,
-    "a0": 10, "a1": 11, "a2": 12, "a3": 13,
-    "a4": 14, "a5": 15, "a6": 16, "a7": 17,
-    "s2": 18, "s3": 19, "s4": 20, "s5": 21,
-    "s6": 22, "s7": 23, "s8": 24, "s9": 25,
-    "s10": 26, "s11": 27,
-    "t3": 28, "t4": 29, "t5": 30, "t6": 31,
-})
+from __future__ import annotations
+
+from typing import Dict
+
+_REG_NAMES = [
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
+    "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
+    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
+    "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+]
 
 
-def _parse_reg(token: str) -> int:
-    """레지스터 토큰을 번호로 변환한다."""
-    token = token.strip().rstrip(",")
-    if token not in _REG_MAP:
-        raise ValueError(f"알 수 없는 레지스터: {token}")
-    return _REG_MAP[token]
+def _bits(value: int, start: int, end: int) -> int:
+    mask = (1 << (end - start + 1)) - 1
+    return (value >> start) & mask
 
 
-def _parse_imm(token: str) -> int:
-    """즉시값 토큰을 정수로 변환한다 (10진수, 16진수 지원)."""
-    token = token.strip().rstrip(",")
-    return int(token, 0)
+def _sign_extend(value: int, bits: int) -> int:
+    sign_bit = 1 << (bits - 1)
+    value &= (1 << bits) - 1
+    return value - (1 << bits) if value & sign_bit else value
 
 
-def _parse_mem(token: str) -> tuple[int, int]:
-    """메모리 오퍼랜드 'imm(rs)' 형태를 파싱한다."""
-    token = token.strip()
-    imm_str, rest = token.split("(")
-    rs_str = rest.rstrip(")")
-    return _parse_imm(imm_str), _parse_reg(rs_str)
+def _register_name(reg_num: int) -> str:
+    return _REG_NAMES[reg_num] if 0 <= reg_num < len(_REG_NAMES) else f"x{reg_num}"
 
 
-def decode(instr: str) -> dict:
-    """
-    어셈블리 명령어 문자열을 해석하여 필드별로 분리한다.
+def decode(raw_word: int) -> Dict[str, object]:
+    opcode = _bits(raw_word, 0, 6)
+    rd = _bits(raw_word, 7, 11)
+    funct3 = _bits(raw_word, 12, 14)
+    rs1 = _bits(raw_word, 15, 19)
+    rs2 = _bits(raw_word, 20, 24)
+    funct7 = _bits(raw_word, 25, 31)
 
-    Args:
-        instr: 어셈블리 명령어 (예: "addi x1, x0, 10")
-
-    Returns:
-        dict: op, rd, rs1, rs2, imm, reg_write, mem_read, mem_write, branch 등
-    """
-    parts = instr.strip().split()
-    op = parts[0].lower()
+    imm_i = _sign_extend(_bits(raw_word, 20, 31), 12)
+    imm_s = _sign_extend((_bits(raw_word, 25, 31) << 5) | _bits(raw_word, 7, 11), 12)
+    imm_b = _sign_extend(
+        (_bits(raw_word, 31, 31) << 12)
+        | (_bits(raw_word, 7, 7) << 11)
+        | (_bits(raw_word, 25, 30) << 5)
+        | (_bits(raw_word, 8, 11) << 1),
+        13,
+    )
+    imm_u = _sign_extend(_bits(raw_word, 12, 31), 20) << 12
+    imm_j = _sign_extend(
+        (_bits(raw_word, 31, 31) << 20)
+        | (_bits(raw_word, 12, 19) << 12)
+        | (_bits(raw_word, 20, 20) << 11)
+        | (_bits(raw_word, 21, 30) << 1),
+        21,
+    )
 
     result = {
-        "op": op,
-        "rd": 0,
-        "rs1": 0,
-        "rs2": 0,
+        "raw": raw_word,
+        "op": "unknown",
+        "rd": rd,
+        "rs1": rs1,
+        "rs2": rs2,
         "imm": 0,
         "reg_write": False,
         "mem_read": False,
         "mem_write": False,
         "branch": False,
+        "jump": False,
+        "assembly": "unknown",
     }
 
-    # R-type: add, sub, and, or, xor, sll, srl, sra, slt, sltu
-    if op in ("add", "sub", "and", "or", "xor", "sll", "srl", "sra", "slt", "sltu"):
-        result["rd"] = _parse_reg(parts[1])
-        result["rs1"] = _parse_reg(parts[2])
-        result["rs2"] = _parse_reg(parts[3])
+    if opcode == 0b0110011:
+        if funct7 == 0b0000000 and funct3 == 0b000:
+            result["op"] = "add"
+        elif funct7 == 0b0100000 and funct3 == 0b000:
+            result["op"] = "sub"
+        elif funct7 == 0b0000000 and funct3 == 0b111:
+            result["op"] = "and"
+        elif funct7 == 0b0000000 and funct3 == 0b110:
+            result["op"] = "or"
+        elif funct7 == 0b0000000 and funct3 == 0b100:
+            result["op"] = "xor"
+        elif funct7 == 0b0000000 and funct3 == 0b001:
+            result["op"] = "sll"
+        elif funct7 == 0b0000000 and funct3 == 0b101:
+            result["op"] = "srl"
+        elif funct7 == 0b0100000 and funct3 == 0b101:
+            result["op"] = "sra"
+        elif funct7 == 0b0000000 and funct3 == 0b010:
+            result["op"] = "slt"
+        elif funct7 == 0b0000000 and funct3 == 0b011:
+            result["op"] = "sltu"
+        elif funct7 == 0b0000001 and funct3 == 0b000:
+            result["op"] = "mul"
+        elif funct7 == 0b0000001 and funct3 == 0b001:
+            result["op"] = "mulh"
+        elif funct7 == 0b0000001 and funct3 == 0b100:
+            result["op"] = "div"
+        elif funct7 == 0b0000001 and funct3 == 0b101:
+            result["op"] = "divu"
+        elif funct7 == 0b0000001 and funct3 == 0b110:
+            result["op"] = "rem"
+        elif funct7 == 0b0000001 and funct3 == 0b111:
+            result["op"] = "remu"
+        else:
+            raise ValueError(f"지원하지 않는 R-type 명령어: funct7={funct7:07b}, funct3={funct3:03b}")
         result["reg_write"] = True
+        result["assembly"] = f"{result['op']} {_register_name(rd)}, {_register_name(rs1)}, {_register_name(rs2)}"
 
-    # I-type 산술: addi, andi, ori, xori, slti, sltiu, slli, srli, srai
-    elif op in ("addi", "andi", "ori", "xori", "slti", "sltiu", "slli", "srli", "srai"):
-        result["rd"] = _parse_reg(parts[1])
-        result["rs1"] = _parse_reg(parts[2])
-        result["imm"] = _parse_imm(parts[3])
+    elif opcode == 0b0010011:
+        if funct3 == 0b000:
+            result["op"] = "addi"
+        elif funct3 == 0b111:
+            result["op"] = "andi"
+        elif funct3 == 0b110:
+            result["op"] = "ori"
+        elif funct3 == 0b100:
+            result["op"] = "xori"
+        elif funct3 == 0b010:
+            result["op"] = "slti"
+        elif funct3 == 0b011:
+            result["op"] = "sltiu"
+        elif funct3 == 0b001 and funct7 == 0b0000000:
+            result["op"] = "slli"
+        elif funct3 == 0b101 and funct7 == 0b0000000:
+            result["op"] = "srli"
+        elif funct3 == 0b101 and funct7 == 0b0100000:
+            result["op"] = "srai"
+        else:
+            raise ValueError(f"지원하지 않는 I-type 명령어: funct7={funct7:07b}, funct3={funct3:03b}")
+        result["imm"] = imm_i
         result["reg_write"] = True
+        result["assembly"] = f"{result['op']} {_register_name(rd)}, {_register_name(rs1)}, {imm_i}"
 
-    # Load: lw rd, imm(rs1)
-    elif op == "lw":
-        result["rd"] = _parse_reg(parts[1])
-        imm, rs1 = _parse_mem(parts[2])
+    elif opcode == 0b0000011 and funct3 == 0b010:
+        result["op"] = "lw"
+        result["imm"] = imm_i
         result["rs1"] = rs1
-        result["imm"] = imm
         result["reg_write"] = True
         result["mem_read"] = True
+        result["assembly"] = f"lw {_register_name(rd)}, {imm_i}({_register_name(rs1)})"
 
-    # Store: sw rs2, imm(rs1)
-    elif op == "sw":
-        result["rs2"] = _parse_reg(parts[1])
-        imm, rs1 = _parse_mem(parts[2])
+    elif opcode == 0b0100011 and funct3 == 0b010:
+        result["op"] = "sw"
+        result["imm"] = imm_s
         result["rs1"] = rs1
-        result["imm"] = imm
+        result["rs2"] = rs2
         result["mem_write"] = True
+        result["assembly"] = f"sw {_register_name(rs2)}, {imm_s}({_register_name(rs1)})"
 
-    # Branch: beq, bne, blt, bge, bltu, bgeu
-    elif op in ("beq", "bne", "blt", "bge", "bltu", "bgeu"):
-        result["rs1"] = _parse_reg(parts[1])
-        result["rs2"] = _parse_reg(parts[2])
-        result["imm"] = _parse_imm(parts[3])
+    elif opcode == 0b1100011:
+        branch_ops = {
+            0b000: "beq",
+            0b001: "bne",
+            0b100: "blt",
+            0b101: "bge",
+            0b110: "bltu",
+            0b111: "bgeu",
+        }
+        if funct3 not in branch_ops:
+            raise ValueError(f"지원하지 않는 Branch 명령어: funct3={funct3:03b}")
+        result["op"] = branch_ops[funct3]
+        result["imm"] = imm_b
         result["branch"] = True
+        result["assembly"] = f"{result['op']} {_register_name(rs1)}, {_register_name(rs2)}, {imm_b}"
 
-    # lui rd, imm
-    elif op == "lui":
-        result["rd"] = _parse_reg(parts[1])
-        result["imm"] = _parse_imm(parts[2])
+    elif opcode == 0b0110111:
+        result["op"] = "lui"
+        result["imm"] = imm_u
         result["reg_write"] = True
+        result["assembly"] = f"lui {_register_name(rd)}, {imm_u}"
 
-    # jal rd, imm
-    elif op == "jal":
-        result["rd"] = _parse_reg(parts[1])
-        result["imm"] = _parse_imm(parts[2])
+    elif opcode == 0b0010111:
+        result["op"] = "auipc"
+        result["imm"] = imm_u
         result["reg_write"] = True
-        result["branch"] = True
+        result["assembly"] = f"auipc {_register_name(rd)}, {imm_u}"
 
-    # jalr rd, rs1, imm
-    elif op == "jalr":
-        result["rd"] = _parse_reg(parts[1])
-        result["rs1"] = _parse_reg(parts[2])
-        result["imm"] = _parse_imm(parts[3])
+    elif opcode == 0b1101111:
+        result["op"] = "jal"
+        result["imm"] = imm_j
         result["reg_write"] = True
         result["branch"] = True
+        result["jump"] = True
+        result["assembly"] = f"jal {_register_name(rd)}, {imm_j}"
+
+    elif opcode == 0b1100111 and funct3 == 0b000:
+        result["op"] = "jalr"
+        result["imm"] = imm_i
+        result["rs1"] = rs1
+        result["reg_write"] = True
+        result["branch"] = True
+        result["jump"] = True
+        result["assembly"] = f"jalr {_register_name(rd)}, {_register_name(rs1)}, {imm_i}"
+
+    elif opcode == 0b1110011 and funct3 == 0b000 and raw_word == 0x00000073:
+        result["op"] = "ecall"
+        result["assembly"] = "ecall"
 
     else:
-        raise ValueError(f"지원하지 않는 명령어: {op}")
+        raise ValueError(f"지원하지 않는 명령어: opcode={opcode:07b}, funct3={funct3:03b}, funct7={funct7:07b}")
 
     return result
