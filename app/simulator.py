@@ -11,10 +11,24 @@ from typing import Dict, Optional
 
 from app.decoder import decode
 from app.executor import execute
-from app.memory import load_word, store_word, read_string
+from app.memory import (
+    load_byte,
+    load_halfword,
+    load_word,
+    read_string,
+    store_byte,
+    store_halfword,
+    store_word,
+)
 from app.state import GLOBAL_DICT, register_name
 
 MAX_CYCLES = 2000
+HISTORY_SCHEMA_VERSION = "1.0"
+
+
+def _to_s32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    return value - (1 << 32) if value & (1 << 31) else value
 
 
 def _hex32(value: int) -> str:
@@ -208,12 +222,103 @@ def _make_pipeline_bubble(assembly: str, status: str, flush_reason: Optional[str
 def _buffer_snapshot(entry: Optional[dict]) -> Optional[dict]:
     if entry is None:
         return None
-    return {
+    result = {
         "pc": _hex32(entry["pc"]),
         "raw_instruction": _hex32(entry["raw_instruction"]),
         "assembly": entry["decoded"]["assembly"],
         "status": entry["status"],
         "flush_info": entry["flush_info"],
+    }
+    if entry.get("stall_desc") is not None:
+        result["stall_info"] = {
+            "stall_reason": entry.get("stall_reason"),
+            "stall_desc": entry.get("stall_desc"),
+        }
+    if entry.get("forwarding_info", {}).get("has_forwarded"):
+        result["forwarding_info"] = entry["forwarding_info"]
+        result["forwarding_desc"] = entry.get("forwarding_desc")
+    return result
+
+
+def _empty_cycle_events() -> dict:
+    return {
+        "stall": {
+            "has_stall": False,
+            "stage": None,
+            "assembly": None,
+            "stall_reason": None,
+            "stall_desc": None,
+        },
+        "forwarding": {
+            "has_forwarded": False,
+            "stage": None,
+            "assembly": None,
+            "forwarded_operand_count": 0,
+            "forwarding_info": {
+                "has_forwarded": False,
+                "forwarded_from": [],
+                "forwarded_to": [],
+                "target_register": [],
+                "forwarded_value": [],
+            },
+            "forwarding_desc": None,
+        },
+        "control_hazard": {
+            "has_control_instruction": False,
+            "has_flush": False,
+            "stage": None,
+            "assembly": None,
+            "taken": None,
+            "target_pc": None,
+            "fallthrough_pc": None,
+            "flushed_stages": [],
+            "flush_reason": None,
+            "redirect_pc": None,
+        },
+        "runtime_error": {
+            "has_error": False,
+            "code": None,
+            "stage": None,
+            "assembly": None,
+            "message": None,
+            "reason": None,
+        },
+    }
+
+
+def _runtime_error_code(reason: str) -> str:
+    if "정렬" in reason:
+        return "MEMORY_ALIGNMENT_ERROR"
+    return "RUNTIME_ERROR"
+
+
+def _record_runtime_error(state: dict, cycle_events: dict, stage: str, entry: Optional[dict], reason: str) -> None:
+    state["status"] = "error"
+    state["halt_requested"] = True
+    code = _runtime_error_code(reason)
+    message = f"[Error] {stage} stage runtime error"
+    if entry is not None:
+        message += f" at {entry['decoded']['assembly']}"
+        entry["status"] = "error"
+    message += f": {reason}"
+    state["console_output"] += f"\n{message}"
+    cycle_events["runtime_error"] = {
+        "has_error": True,
+        "code": code,
+        "stage": stage,
+        "assembly": entry["decoded"]["assembly"] if entry is not None else None,
+        "message": reason,
+        "reason": reason,
+    }
+
+
+def _stage_activity_snapshot(pipeline: dict) -> dict:
+    return {
+        "IF": _snapshot_stage("IF", pipeline["IF"]),
+        "ID": _snapshot_stage("ID", pipeline["ID"]),
+        "EX": _snapshot_stage("EX", pipeline["EX"]),
+        "MEM": _snapshot_stage("MEM", pipeline["MEM"]),
+        "WB": _snapshot_stage("WB", pipeline["WB"]),
     }
 
 
@@ -367,7 +472,9 @@ def _handle_ecall(state: dict) -> None:
     if a7 == 10:
         state["status"] = "halted"
         state["halt_requested"] = True
-    elif a7 in (1, 4):
+    elif a7 == 1:
+        state["console_output"] += str(_to_s32(state["regs"][10]))
+    elif a7 == 4:
         address = state["regs"][10]
         state["console_output"] += read_string(state["dmem"], address)
     else:
@@ -403,14 +510,19 @@ def core_single_tick(user_id: str) -> Optional[dict]:
     pipeline = state["pipeline_regs"]
     branch_flush = False
     flush_reason = None
+    redirect_pc = None
+    cycle_events = _empty_cycle_events()
 
     wb_entry = pipeline["WB"]
     if wb_entry is not None and wb_entry["decoded"]["op"] != "nop":
         decoded = wb_entry["decoded"]
         if decoded["reg_write"] and decoded["rd"] != 0 and wb_entry["write_val"] is not None:
-            state["regs"][decoded["rd"]] = wb_entry["write_val"]
+            state["regs"][decoded["rd"]] = wb_entry["write_val"] & 0xFFFFFFFF
         if decoded["op"] == "ecall":
-            _handle_ecall(state)
+            try:
+                _handle_ecall(state)
+            except ValueError as exc:
+                _record_runtime_error(state, cycle_events, "WB", wb_entry, str(exc))
         state["stats"]["instructions_executed"] += 1
         if state["mode"] == "single" and decoded["reg_write"] and decoded["rd"] != 0:
             state["recent_rds"].append(decoded["rd"])
@@ -418,56 +530,148 @@ def core_single_tick(user_id: str) -> Optional[dict]:
                 state["recent_rds"] = state["recent_rds"][-2:]
 
     mem_entry = pipeline["MEM"]
-    if mem_entry is not None and mem_entry["decoded"]["op"] != "nop":
+    if state["status"] != "error" and mem_entry is not None and mem_entry["decoded"]["op"] != "nop":
         decoded = mem_entry["decoded"]
         alu_result = mem_entry["alu"]["alu_result"]
-        if decoded["mem_read"]:
-            mem_entry["mem_read_data"] = load_word(state["dmem"], alu_result)
-            mem_entry["write_val"] = mem_entry["mem_read_data"]
-        elif decoded["mem_write"]:
-            mem_entry["mem_write_data"] = mem_entry["rs2_val"]
-            store_word(state["dmem"], alu_result, mem_entry["mem_write_data"])
+        try:
+            if decoded["mem_read"]:
+                if decoded["op"] == "lb":
+                    mem_entry["mem_read_data"] = load_byte(state["dmem"], alu_result, signed=True)
+                elif decoded["op"] == "lh":
+                    mem_entry["mem_read_data"] = load_halfword(state["dmem"], alu_result, signed=True)
+                elif decoded["op"] == "lbu":
+                    mem_entry["mem_read_data"] = load_byte(state["dmem"], alu_result, signed=False)
+                elif decoded["op"] == "lhu":
+                    mem_entry["mem_read_data"] = load_halfword(state["dmem"], alu_result, signed=False)
+                else:
+                    mem_entry["mem_read_data"] = load_word(state["dmem"], alu_result)
+                mem_entry["write_val"] = mem_entry["mem_read_data"]
+            elif decoded["mem_write"]:
+                mem_entry["mem_write_data"] = mem_entry["rs2_val"]
+                if decoded["op"] == "sb":
+                    store_byte(state["dmem"], alu_result, mem_entry["mem_write_data"])
+                elif decoded["op"] == "sh":
+                    store_halfword(state["dmem"], alu_result, mem_entry["mem_write_data"])
+                else:
+                    store_word(state["dmem"], alu_result, mem_entry["mem_write_data"])
+        except ValueError as exc:
+            _record_runtime_error(state, cycle_events, "MEM", mem_entry, str(exc))
 
     id_entry = pipeline["ID"]
-    if id_entry is not None and id_entry["decoded"]["op"] != "nop":
+    if state["status"] != "error" and id_entry is not None and id_entry["decoded"]["op"] != "nop":
         decoded = id_entry["decoded"]
         id_entry["rs1_val"] = state["regs"][decoded["rs1"]]
         id_entry["rs2_val"] = state["regs"][decoded["rs2"]]
 
     ex_entry = pipeline["EX"]
-    if ex_entry is not None and ex_entry["decoded"]["op"] != "nop":
+    if state["status"] != "error" and ex_entry is not None and ex_entry["decoded"]["op"] != "nop":
         if state["forwarding_enabled"]:
             _compute_forwarding(state, ex_entry, mem_entry, wb_entry)
         decoded = ex_entry["decoded"]
+        if decoded["op"] == "auipc":
+            ex_entry["rs1_val"] = ex_entry["pc"]
         alu = execute(decoded, ex_entry["rs1_val"], ex_entry["rs2_val"])
         ex_entry["alu"] = alu
         if decoded["reg_write"] and not decoded["mem_read"]:
             ex_entry["write_val"] = alu["alu_result"]
         if decoded["branch"] and decoded["op"] in ("beq", "bne", "blt", "bge", "bltu", "bgeu"):
+            target_pc = ex_entry["pc"] + decoded["imm"]
+            fallthrough_pc = ex_entry["pc"] + 4
+            taken = bool(alu["alu_result"])
+            cycle_events["control_hazard"] = {
+                "has_control_instruction": True,
+                "has_flush": taken,
+                "stage": "EX",
+                "assembly": decoded["assembly"],
+                "taken": taken,
+                "target_pc": _hex32(target_pc),
+                "fallthrough_pc": _hex32(fallthrough_pc),
+                "flushed_stages": ["IF", "ID"] if taken else [],
+                "flush_reason": "control_hazard_branch_taken" if taken else None,
+                "redirect_pc": _hex32(target_pc) if taken else None,
+            }
             if alu["alu_result"]:
-                state["pc"] = ex_entry["pc"] + decoded["imm"]
+                state["pc"] = target_pc
+                redirect_pc = state["pc"]
                 state["stats"]["control_hazards"] += 1
                 branch_flush = True
                 flush_reason = "control_hazard_branch_taken"
         elif decoded["op"] == "jal":
             if decoded["rd"] != 0:
                 ex_entry["write_val"] = ex_entry["pc"] + 4
-            state["pc"] = ex_entry["pc"] + decoded["imm"]
+            target_pc = ex_entry["pc"] + decoded["imm"]
+            fallthrough_pc = ex_entry["pc"] + 4
+            state["pc"] = target_pc
+            redirect_pc = state["pc"]
+            cycle_events["control_hazard"] = {
+                "has_control_instruction": True,
+                "has_flush": True,
+                "stage": "EX",
+                "assembly": decoded["assembly"],
+                "taken": True,
+                "target_pc": _hex32(target_pc),
+                "fallthrough_pc": _hex32(fallthrough_pc),
+                "flushed_stages": ["IF", "ID"],
+                "flush_reason": "control_hazard_branch_taken",
+                "redirect_pc": _hex32(target_pc),
+            }
             state["stats"]["control_hazards"] += 1
             branch_flush = True
             flush_reason = "control_hazard_branch_taken"
         elif decoded["op"] == "jalr":
             if decoded["rd"] != 0:
                 ex_entry["write_val"] = ex_entry["pc"] + 4
-            state["pc"] = (ex_entry["rs1_val"] + decoded["imm"]) & ~1
+            target_pc = (ex_entry["rs1_val"] + decoded["imm"]) & ~1
+            fallthrough_pc = ex_entry["pc"] + 4
+            state["pc"] = target_pc
+            redirect_pc = state["pc"]
+            cycle_events["control_hazard"] = {
+                "has_control_instruction": True,
+                "has_flush": True,
+                "stage": "EX",
+                "assembly": decoded["assembly"],
+                "taken": True,
+                "target_pc": _hex32(target_pc),
+                "fallthrough_pc": _hex32(fallthrough_pc),
+                "flushed_stages": ["IF", "ID"],
+                "flush_reason": "control_hazard_branch_taken",
+                "redirect_pc": _hex32(target_pc),
+            }
             state["stats"]["control_hazards"] += 1
             branch_flush = True
             flush_reason = "control_hazard_branch_taken"
 
-    stall_info = _detect_pipeline_stall(state, pipeline)
+    stall_info = None if state["status"] == "error" else _detect_pipeline_stall(state, pipeline)
+    if stall_info is not None and pipeline["ID"] is not None:
+        pipeline["ID"]["status"] = "stalled"
+        pipeline["ID"]["stall_reason"] = stall_info["stall_reason"]
+        pipeline["ID"]["stall_desc"] = stall_info["stall_desc"]
+        cycle_events["stall"] = {
+            "has_stall": True,
+            "stage": "ID",
+            "assembly": pipeline["ID"]["decoded"]["assembly"],
+            "stall_reason": stall_info["stall_reason"],
+            "stall_desc": stall_info["stall_desc"],
+        }
+    if ex_entry is not None and ex_entry.get("forwarding_info", {}).get("has_forwarded"):
+        cycle_events["forwarding"] = {
+            "has_forwarded": True,
+            "stage": "EX",
+            "assembly": ex_entry["decoded"]["assembly"],
+            "forwarded_operand_count": len(ex_entry["forwarding_info"]["forwarded_to"]),
+            "forwarding_info": ex_entry["forwarding_info"],
+            "forwarding_desc": ex_entry.get("forwarding_desc"),
+        }
+    if branch_flush and ex_entry is not None:
+        cycle_events["control_hazard"]["has_flush"] = True
+        cycle_events["control_hazard"]["flush_reason"] = flush_reason
+        cycle_events["control_hazard"]["redirect_pc"] = _hex32(redirect_pc if redirect_pc is not None else state["pc"])
+    stage_activity = _stage_activity_snapshot(pipeline)
 
     fetch_entry = None
-    if not state["halt_requested"] and state["mode"] == "pipeline":
+    if state["status"] == "error":
+        fetch_entry = None
+    elif not state["halt_requested"] and state["mode"] == "pipeline":
         if branch_flush:
             fetch_entry = None
         elif stall_info:
@@ -478,7 +682,9 @@ def core_single_tick(user_id: str) -> Optional[dict]:
         if not _has_active_pipeline(state):
             fetch_entry = _fetch_pipeline_entry(state)
 
-    if stall_info is not None:
+    if state["status"] == "error":
+        new_pipeline = pipeline
+    elif stall_info is not None:
         stall_bubble = _make_pipeline_bubble("bubble", "stalled", stall_reason=stall_info["stall_reason"], stall_desc=stall_info["stall_desc"])
         state["stats"]["stalls"] += 1
         state["stats"]["data_hazards"] += 1
@@ -489,6 +695,8 @@ def core_single_tick(user_id: str) -> Optional[dict]:
             "ID": pipeline["ID"],
             "IF": pipeline["IF"],
         }
+        if new_pipeline["ID"] is not None:
+            new_pipeline["ID"]["status"] = "normal"
     elif branch_flush:
         new_pipeline = {
             "WB": pipeline["MEM"],
@@ -534,6 +742,8 @@ def core_single_tick(user_id: str) -> Optional[dict]:
         "ex_stage": _snapshot_stage("EX", state["pipeline_regs"]["EX"]),
         "mem_stage": _snapshot_stage("MEM", state["pipeline_regs"]["MEM"]),
         "wb_stage": _snapshot_stage("WB", state["pipeline_regs"]["WB"]),
+        "stage_activity": stage_activity,
+        "cycle_events": cycle_events,
         "global_result": _snapshot_global(state),
     }
     if virtual_hazard_alert is not None:
@@ -560,6 +770,17 @@ def run_simulation(user_id: str, max_cycles: int = MAX_CYCLES) -> dict:
             break
 
     return {
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "simulator": {
+            "mode": state["mode"],
+            "max_cycles": max_cycles,
+            "pipeline_model": "5-stage-in-order",
+        },
+        "program": {
+            "entry_point": _hex32(state["entry_point"]),
+            "instruction_words": len(state["imem"]),
+            "data_words": len(state["dmem"]),
+        },
         "status": state["status"],
         "summary": {
             **state["stats"],

@@ -29,6 +29,9 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+results/
+tests/results/
+examples/*.elf
 
 # OS 자동 생성 파일
 .DS_Store

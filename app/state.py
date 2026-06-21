@@ -11,8 +11,11 @@ from typing import Optional
 
 from elftools.elf.elffile import ELFFile
 
+from app.validator import validate_program
+
 # 모든 사용자의 CPU 상태를 담는 단일 진실 소스
 GLOBAL_DICT = {}
+DEFAULT_STACK_POINTER = 0x7FFFEFFC
 
 REG_ALIASES = {
     0: "zero", 1: "ra", 2: "sp", 3: "gp", 4: "tp",
@@ -45,6 +48,19 @@ def _load_section_data(elf, section_name: str) -> dict:
     return result
 
 
+def _load_zero_section(elf, section_name: str) -> dict:
+    section = elf.get_section_by_name(section_name)
+    if section is None:
+        return {}
+
+    base_addr = section["sh_addr"]
+    size = section["sh_size"]
+    result = {}
+    for offset in range(0, size, 4):
+        result[base_addr + offset] = 0
+    return result
+
+
 def _load_elf_sections(elf_bytes: bytes) -> tuple[int, dict, dict]:
     stream = BytesIO(elf_bytes)
     elf = ELFFile(stream)
@@ -57,10 +73,13 @@ def _load_elf_sections(elf_bytes: bytes) -> tuple[int, dict, dict]:
     dmem = {}
     dmem.update(_load_section_data(elf, ".rodata"))
     dmem.update(_load_section_data(elf, ".data"))
+    dmem.update(_load_section_data(elf, ".sdata"))
+    dmem.update(_load_zero_section(elf, ".bss"))
+    dmem.update(_load_zero_section(elf, ".sbss"))
     return entry_point, imem, dmem
 
 
-def create_state(user_id: str, elf_bytes: bytes, mode: str = "single") -> dict:
+def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate: bool = True) -> dict:
     """
     새로운 사용자 상태(가상 CPU)를 초기화한다.
 
@@ -68,7 +87,11 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single") -> dict:
         user_id: 사용자 고유 식별자
         elf_bytes: ELF 바이너리 데이터
         mode: 실행 모드 ("single" | "pipeline")
+        validate: 실행 전 instruction 지원 범위 검증 여부
     """
+    if validate:
+        validate_program(elf_bytes, raise_on_error=True)
+
     try:
         entry_point, imem, dmem = _load_elf_sections(elf_bytes)
     except Exception:
@@ -87,7 +110,7 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single") -> dict:
         "pc": entry_point,
         "imem": imem,
         "dmem": dmem,
-        "regs": [0] * 32,
+        "regs": [0, 0, DEFAULT_STACK_POINTER, *([0] * 29)],
         "status": "ready",
         "halt_requested": False,
         "console_output": "",

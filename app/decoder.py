@@ -97,6 +97,10 @@ def decode(raw_word: int) -> Dict[str, object]:
             result["op"] = "mul"
         elif funct7 == 0b0000001 and funct3 == 0b001:
             result["op"] = "mulh"
+        elif funct7 == 0b0000001 and funct3 == 0b010:
+            result["op"] = "mulhsu"
+        elif funct7 == 0b0000001 and funct3 == 0b011:
+            result["op"] = "mulhu"
         elif funct7 == 0b0000001 and funct3 == 0b100:
             result["op"] = "div"
         elif funct7 == 0b0000001 and funct3 == 0b101:
@@ -135,21 +139,37 @@ def decode(raw_word: int) -> Dict[str, object]:
         result["reg_write"] = True
         result["assembly"] = f"{result['op']} {_register_name(rd)}, {_register_name(rs1)}, {imm_i}"
 
-    elif opcode == 0b0000011 and funct3 == 0b010:
-        result["op"] = "lw"
+    elif opcode == 0b0000011:
+        load_ops = {
+            0b000: "lb",
+            0b001: "lh",
+            0b010: "lw",
+            0b100: "lbu",
+            0b101: "lhu",
+        }
+        if funct3 not in load_ops:
+            raise ValueError(f"지원하지 않는 Load 명령어: funct3={funct3:03b}")
+        result["op"] = load_ops[funct3]
         result["imm"] = imm_i
         result["rs1"] = rs1
         result["reg_write"] = True
         result["mem_read"] = True
-        result["assembly"] = f"lw {_register_name(rd)}, {imm_i}({_register_name(rs1)})"
+        result["assembly"] = f"{result['op']} {_register_name(rd)}, {imm_i}({_register_name(rs1)})"
 
-    elif opcode == 0b0100011 and funct3 == 0b010:
-        result["op"] = "sw"
+    elif opcode == 0b0100011:
+        store_ops = {
+            0b000: "sb",
+            0b001: "sh",
+            0b010: "sw",
+        }
+        if funct3 not in store_ops:
+            raise ValueError(f"지원하지 않는 Store 명령어: funct3={funct3:03b}")
+        result["op"] = store_ops[funct3]
         result["imm"] = imm_s
         result["rs1"] = rs1
         result["rs2"] = rs2
         result["mem_write"] = True
-        result["assembly"] = f"sw {_register_name(rs2)}, {imm_s}({_register_name(rs1)})"
+        result["assembly"] = f"{result['op']} {_register_name(rs2)}, {imm_s}({_register_name(rs1)})"
 
     elif opcode == 0b1100011:
         branch_ops = {

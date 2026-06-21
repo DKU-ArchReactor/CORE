@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from app.state import create_state
 from app.simulator import run_simulation
+from app.validator import ProgramValidationError
 
 
 def parse_args():
@@ -64,7 +65,16 @@ def main():
         raise FileNotFoundError(f"Input file not found: {args.input}")
 
     elf_bytes = args.input.read_bytes()
-    create_state("prog", elf_bytes, mode=args.mode)
+    try:
+        create_state("prog", elf_bytes, mode=args.mode)
+    except ProgramValidationError as exc:
+        print("status: validation_error")
+        print("Unsupported instructions:")
+        for error in exc.errors:
+            item = error.to_dict()
+            print(f"- [{item['code']}] {item['address']} {item['raw_word']}: {item['message']}")
+        raise SystemExit(1)
+
     result = run_simulation("prog", max_cycles=args.max_clocks)
 
     print(f"status: {result.get('status')}")

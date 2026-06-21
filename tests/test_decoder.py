@@ -26,6 +26,12 @@ def test_decode_mul():
     assert result["reg_write"] is True
 
 
+def test_decode_mul_high_variants():
+    assert decode(0x02B51533)["op"] == "mulh"
+    assert decode(0x02B52533)["op"] == "mulhsu"
+    assert decode(0x02B53533)["op"] == "mulhu"
+
+
 def test_decode_div_rem():
     raw_div = 0x02B54533  # div x10, x10, x11
     raw_rem = 0x02B56533  # rem x10, x10, x11
@@ -38,6 +44,15 @@ def test_decode_lw_sw():
     raw_sw = 0x00A2A423  # sw x10, 8(x5)
     assert decode(raw_lw)["op"] == "lw"
     assert decode(raw_sw)["op"] == "sw"
+
+
+def test_decode_byte_halfword_load_store():
+    assert decode(0x00130283)["op"] == "lb"   # lb x5, 1(x6)
+    assert decode(0x00131283)["op"] == "lh"   # lh x5, 1(x6)
+    assert decode(0x00134283)["op"] == "lbu"  # lbu x5, 1(x6)
+    assert decode(0x00135283)["op"] == "lhu"  # lhu x5, 1(x6)
+    assert decode(0x005300A3)["op"] == "sb"   # sb x5, 1(x6)
+    assert decode(0x005310A3)["op"] == "sh"   # sh x5, 1(x6)
 
 
 def test_decode_branch():

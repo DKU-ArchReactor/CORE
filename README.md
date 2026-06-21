@@ -1,77 +1,137 @@
-# ArchReactor: An Educational RISC-V Architecture Simulator for Computer Engineering Freshmen
+# ArchReactor
 
-**ArchReactor** is an educational RISC-V architecture simulation platform  
-designed for computer engineering freshmen.
+ArchReactor is an educational RV32IM simulator core for computer architecture courses.
 
-This project helps students understand how instructions are executed  
-inside a CPU, step by step and cycle by cycle.
+The current repository focuses on the Python simulation core: instruction decode/execute, memory, single-step execution, 5-stage pipeline history, hazard events, and validation of supported RISC-V instructions.
 
----
+## Goals
 
-## Architecture Overview
+ArchReactor is built for students who need to inspect how a small C/RISC-V program moves through a CPU model:
 
-![Arch-Reactor Architecture](architecture.png)
+- instruction fetch, decode, execute, memory, writeback
+- register and memory state changes
+- load-use stalls
+- EX/MEM and MEM/WB forwarding
+- branch and jump flushes
+- runtime errors such as misaligned memory access
 
----
+It is not a full RISC-V machine emulator. The supported subset is intentionally constrained for teaching.
 
-## Motivation
+## Current Components
 
-Many computer engineering students find it difficult to understand:
+- `app/decoder.py`: RV32IM instruction decoder
+- `app/executor.py`: ALU and branch operation semantics
+- `app/memory.py`: word, halfword, and byte memory access
+- `app/state.py`: ELF/raw program loading and CPU state creation
+- `app/simulator.py`: single and pipeline simulation, cycle history, hazard events
+- `app/validator.py`: pre-simulation instruction support validation
+- `tests/tester.py`: CLI runner that writes `simulation_result.json`
 
-- How C or assembly code is executed inside a CPU
-- How instructions move through pipeline stages
-- Why similar code can have different execution times
+## Quick Check
 
-ArchReactor was created to visualize these processes clearly  
-and help students learn computer architecture more intuitively.
+Run the full local verification suite:
 
----
-
-## Key Features
-
-- RISC-V (RV32I) instruction simulation
-- Pipeline visualization (IF, ID, EX, MEM, WB)
-- Cycle-by-cycle execution view
-- Register and memory state tracking
-- Stall, forwarding, and flush explanation
-- Code saving and reloading
-- Execution statistics (cycles, CPI)
-
-*(C language support and AI-based optimization advice are planned features.)*
-
----
-
-## System Architecture
-
-ArchReactor is built with three main components:
-
-- **Core (Python)**  
-  - RISC-V instruction execution logic  
-  - Pipeline and hazard simulation  
-
-- **Backend (FastAPI)**  
-  - API server  
-  - Code and execution history management  
-  - Core integration  
-
-- **Frontend (React)**  
-  - Code editor  
-  - Pipeline and state visualization  
-
----
-
-## Target Users
-
-- Computer Engineering freshmen
-- Students learning computer architecture
-- Anyone interested in how code runs on hardware
-
----
-
-## How to Run (Development)
-
-### Frontend
 ```bash
-cd frontend
-npm install
-npm run dev
+scripts/check.sh
+```
+
+This runs:
+
+- unit tests
+- ELF validation
+- single-mode smoke simulation
+- pipeline-mode smoke simulation
+
+## Run the Reference Program
+
+```bash
+python tests/tester.py --input tests/program2.elf --mode single --output-dir results
+python tests/tester.py --input tests/program2.elf --mode pipeline --output-dir tests/results
+```
+
+Expected console output:
+
+```text
+Advanced Pipeline Test Start...
+Advanced Test Result: ALL PASS
+```
+
+## Compile C for ArchReactor
+
+Use the compile wrapper:
+
+```bash
+scripts/compile_rv32im.sh examples/01_arithmetic.c examples/01_arithmetic.elf
+```
+
+The wrapper expects `riscv64-unknown-elf-gcc` on `PATH`. If your compiler is elsewhere:
+
+```bash
+RISCV_CC=/path/to/riscv64-unknown-elf-gcc scripts/compile_rv32im.sh examples/01_arithmetic.c examples/01_arithmetic.elf
+```
+
+The wrapper compiles with a constrained RV32IM profile and then validates the produced ELF before simulation.
+
+## Teaching Examples
+
+Small C examples live in `examples/`:
+
+- `01_arithmetic.c`
+- `02_load_use_stall.c`
+- `03_forwarding.c`
+- `04_branch_flush.c`
+- `05_function_call.c`
+- `06_byte_halfword_memory.c`
+
+See `examples/README.md` for usage.
+
+## Documentation
+
+- `docs/supported-subset.md`: supported ISA, syscall subset, memory model, pipeline assumptions, recommended C subset
+- `docs/history-schema.md`: JSON result and cycle history schema for UI/backend consumers
+
+## Simulation History
+
+Each cycle records:
+
+- `stage_activity`: what IF/ID/EX/MEM/WB did during the clock
+- `buffers`: pipeline register state after the clock edge
+- `cycle_events`: stall, forwarding, control hazard, runtime error
+- `global_result`: architectural state snapshot
+
+For teaching UI, prefer `stage_activity` and `cycle_events`.
+
+## Development
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Run tests:
+
+```bash
+pytest -q
+```
+
+Validate an ELF or raw instruction file:
+
+```bash
+python -m app.validator tests/program2.elf
+```
+
+Run a simulation:
+
+```bash
+python tests/tester.py --input tests/program2.elf --mode pipeline --history
+```
+
+## Docker
+
+The Dockerfile is for test/CI-style execution of the Python core:
+
+```bash
+docker build -t archreactor-core .
+docker run --rm archreactor-core
+```

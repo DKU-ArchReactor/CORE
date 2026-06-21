@@ -62,7 +62,7 @@ def execute(decoded: dict, rs1_val: int, rs2_val: int) -> dict:
         result = _to_u32(_to_u32(rs1_val) >> (imm & 0x1F))
     elif op == "srai":
         result = _to_s32(_to_s32(rs1_val) >> (imm & 0x1F))
-    elif op in ("lw", "sw"):
+    elif op in ("lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw"):
         result = _to_s32(rs1_val + imm)
     elif op == "lui":
         result = _to_s32(imm)
@@ -71,9 +71,9 @@ def execute(decoded: dict, rs1_val: int, rs2_val: int) -> dict:
     elif op in ("jal", "jalr"):
         result = 0
     elif op == "beq":
-        result = 1 if rs1_val == rs2_val else 0
+        result = 1 if _to_u32(rs1_val) == _to_u32(rs2_val) else 0
     elif op == "bne":
-        result = 1 if rs1_val != rs2_val else 0
+        result = 1 if _to_u32(rs1_val) != _to_u32(rs2_val) else 0
     elif op == "blt":
         result = 1 if _to_s32(rs1_val) < _to_s32(rs2_val) else 0
     elif op == "bge":
@@ -87,32 +87,42 @@ def execute(decoded: dict, rs1_val: int, rs2_val: int) -> dict:
     elif op == "mulh":
         product = _to_s32(rs1_val) * _to_s32(rs2_val)
         result = _to_s32((product >> 32) & _MASK32)
+    elif op == "mulhsu":
+        product = _to_s32(rs1_val) * _to_u32(rs2_val)
+        result = _to_s32((product >> 32) & _MASK32)
+    elif op == "mulhu":
+        product = _to_u32(rs1_val) * _to_u32(rs2_val)
+        result = _to_s32((product >> 32) & _MASK32)
     elif op == "div":
         dividend = _to_s32(rs1_val)
         divisor = _to_s32(rs2_val)
-        result = 0 if divisor == 0 else _to_s32(int(dividend / divisor))
+        result = -1 if divisor == 0 else _to_s32(int(dividend / divisor))
     elif op == "divu":
         dividend = _to_u32(rs1_val)
         divisor = _to_u32(rs2_val)
-        result = 0 if divisor == 0 else _to_u32(dividend // divisor)
+        result = _MASK32 if divisor == 0 else _to_u32(dividend // divisor)
     elif op == "rem":
         dividend = _to_s32(rs1_val)
         divisor = _to_s32(rs2_val)
         if divisor == 0:
-            result = 0
+            result = dividend
         else:
             quotient = int(dividend / divisor)
             result = _to_s32(dividend - quotient * divisor)
     elif op == "remu":
         dividend = _to_u32(rs1_val)
         divisor = _to_u32(rs2_val)
-        result = 0 if divisor == 0 else _to_u32(dividend % divisor)
+        result = dividend if divisor == 0 else _to_u32(dividend % divisor)
     elif op == "ecall":
         result = 0
     else:
         raise ValueError(f"ALU: 지원하지 않는 연산: {op}")
 
-    operand2 = 0 if op == "ecall" else _to_u32(rs2_val if op not in ("addi", "andi", "ori", "xori", "slti", "sltiu", "slli", "srli", "srai", "lw", "sw", "lui", "auipc") else imm)
+    imm_ops = (
+        "addi", "andi", "ori", "xori", "slti", "sltiu", "slli", "srli", "srai",
+        "lb", "lh", "lw", "lbu", "lhu", "sb", "sh", "sw", "lui", "auipc",
+    )
+    operand2 = 0 if op == "ecall" else _to_u32(rs2_val if op not in imm_ops else imm)
     return {
         "alu_result": result,
         "alu_op": op,

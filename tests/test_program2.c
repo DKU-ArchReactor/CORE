@@ -51,8 +51,15 @@ int main() {
     int val4 = val3 + 20;    // ③ val3 사용 -> Stall 없이 MEM_WB 레지스터에서 EX 단으로 Forwarding 발생
 
     // [TEST 3] RV32M 규격 에지 케이스 검증 (0으로 나누기)
-    int divisor = 0;
-    int div_zero = 500 / divisor; // RISC-V 표준 사양에 따라, 크래시 없이 결과값 -1이 나와야 함
+    int div_zero;
+    asm volatile (
+        "li a4, 500\n\t"      // a4 = 500
+        "li a5, 0\n\t"        // a5 = 0 (divisor)
+        "div %0, a4, a5\n\t"  // div dest, rs1=500, rs2=0
+        : "=r"(div_zero)
+        :
+        : "a4", "a5"
+    );
 
     // [TEST 4] 함수 호출을 통한 JAL / JALR 분기 및 Flush 검증
     int squared_result = calculate_square(val2); // val2는 60이므로 결과는 3600

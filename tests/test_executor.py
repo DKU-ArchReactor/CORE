@@ -16,14 +16,20 @@ def test_mul_signed():
     assert result["alu_result"] == -6
 
 
-def test_div_by_zero_returns_zero():
+def test_mul_high_variants():
+    assert execute({"op": "mulh"}, -2, 3)["alu_result"] == -1
+    assert execute({"op": "mulhsu"}, -2, 3)["alu_result"] == -1
+    assert execute({"op": "mulhu"}, 0xFFFFFFFF, 2)["alu_result"] == 1
+
+
+def test_div_by_zero_returns_minus_one():
     result = execute({"op": "div"}, 5, 0)
-    assert result["alu_result"] == 0
+    assert result["alu_result"] == -1
 
 
-def test_rem_by_zero_returns_zero():
+def test_rem_by_zero_returns_dividend():
     result = execute({"op": "rem"}, 5, 0)
-    assert result["alu_result"] == 0
+    assert result["alu_result"] == 5
 
 
 def test_div_negative():
@@ -34,3 +40,8 @@ def test_div_negative():
 def test_rem_negative():
     result = execute({"op": "rem"}, -7, 2)
     assert result["alu_result"] == -1
+
+
+def test_branch_compares_32bit_bit_patterns():
+    assert execute({"op": "beq"}, 0xFFFFFFFF, -1)["alu_result"] == 1
+    assert execute({"op": "bne"}, 0xFFFFFFFF, -1)["alu_result"] == 0
