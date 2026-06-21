@@ -37,9 +37,9 @@ def _snapshot_global(state: dict) -> Dict[str, object]:
     }
 
 
-def _if_stage_snapshot(state: dict, raw_word: int, assembly: str, status: str = "normal", flushed: bool = False, reason: Optional[str] = None) -> dict:
+def _if_stage_snapshot(pc: int, raw_word: int, assembly: str, status: str = "normal", flushed: bool = False, reason: Optional[str] = None) -> dict:
     return {
-        "pc": _hex32(state["pc"]),
+        "pc": _hex32(pc),
         "raw_instruction": _hex32(raw_word),
         "assembly": assembly,
         "status": status,
@@ -50,10 +50,10 @@ def _if_stage_snapshot(state: dict, raw_word: int, assembly: str, status: str = 
     }
 
 
-def _id_stage_snapshot(decoded: dict, rs1_val: Optional[int], rs2_val: Optional[int], status: str = "normal", has_stall: bool = False, stall_reason: Optional[str] = None) -> dict:
+def _id_stage_snapshot(decoded: dict, rs1_val: Optional[int], rs2_val: Optional[int], status: str = "normal", has_stall: bool = False, stall_reason: Optional[str] = None, stall_desc: Optional[str] = None) -> dict:
     rs1_hex = _hex32(rs1_val) if rs1_val is not None else "0x00000000"
     rs2_hex = _hex32(rs2_val) if rs2_val is not None else "0x00000000"
-    return {
+    result = {
         "assembly": decoded["assembly"],
         "status": status,
         "decoded_fields": {
@@ -76,11 +76,14 @@ def _id_stage_snapshot(decoded: dict, rs1_val: Optional[int], rs2_val: Optional[
             "stall_reason": stall_reason,
         },
     }
+    if stall_desc is not None:
+        result["stall_desc"] = stall_desc
+    return result
 
 
-def _ex_stage_snapshot(decoded: dict, alu: dict, forwarding_info: Optional[dict] = None, status: str = "normal") -> dict:
+def _ex_stage_snapshot(decoded: dict, alu: dict, forwarding_info: Optional[dict] = None, status: str = "normal", forwarding_desc: Optional[str] = None) -> dict:
     status = status if status != "normal" else ("forwarding_active" if forwarding_info and forwarding_info.get("has_forwarded") else "normal")
-    return {
+    result = {
         "assembly": decoded["assembly"],
         "status": status,
         "alu_operation": alu["alu_op"],
@@ -89,15 +92,19 @@ def _ex_stage_snapshot(decoded: dict, alu: dict, forwarding_info: Optional[dict]
         "alu_result": _hex32(alu["alu_result"]),
         "forwarding_info": forwarding_info or {
             "has_forwarded": False,
-            "forwarded_from": None,
-            "forwarded_to": None,
-            "target_register": None,
+            "forwarded_from": [],
+            "forwarded_to": [],
+            "target_register": [],
+            "forwarded_value": [],
         },
         "flush_info": {
             "is_flushed": False,
             "reason": None,
         },
     }
+    if forwarding_desc is not None:
+        result["forwarding_desc"] = forwarding_desc
+    return result
 
 
 def _mem_stage_snapshot(decoded: dict, alu_result: int, read_data: Optional[int], write_data: Optional[int], status: str = "normal", flush_info: Optional[dict] = None) -> dict:
@@ -140,6 +147,61 @@ def _make_pipeline_entry(pc: int, raw_word: int) -> dict:
             "is_flushed": False,
             "reason": None,
         },
+        "stall_reason": None,
+        "stall_desc": None,
+        "forwarding_info": {
+            "has_forwarded": False,
+            "forwarded_from": [],
+            "forwarded_to": [],
+            "target_register": [],
+            "forwarded_value": [],
+        },
+        "forwarding_desc": None,
+    }
+
+
+def _make_pipeline_bubble(assembly: str, status: str, flush_reason: Optional[str] = None, stall_reason: Optional[str] = None, stall_desc: Optional[str] = None) -> dict:
+    return {
+        "pc": 0,
+        "raw_instruction": 0,
+        "decoded": {
+            "assembly": assembly,
+            "op": "nop",
+            "rd": 0,
+            "rs1": 0,
+            "rs2": 0,
+            "imm": 0,
+            "reg_write": False,
+            "mem_read": False,
+            "mem_write": False,
+            "branch": False,
+        },
+        "rs1_val": None,
+        "rs2_val": None,
+        "alu": {
+            "alu_op": "nop",
+            "operand1": 0,
+            "operand2": 0,
+            "alu_result": 0,
+        },
+        "mem_read_data": None,
+        "mem_write_data": None,
+        "write_val": None,
+        "status": status,
+        "flush_info": {
+            "is_flushed": status == "flushed",
+            "reason": flush_reason,
+        },
+        "stall_reason": stall_reason,
+        "stall_desc": stall_desc,
+        "forwarding_info": {
+            "has_forwarded": False,
+            "forwarded_from": [],
+            "forwarded_to": [],
+            "target_register": [],
+            "forwarded_value": [],
+        },
+        "forwarding_desc": None,
     }
 
 
@@ -165,9 +227,17 @@ def _snapshot_stage(stage_name: str, entry: Optional[dict]) -> dict:
 
     decoded = entry["decoded"]
     if stage_name == "IF":
-        return _if_stage_snapshot(entry, entry["raw_instruction"], decoded["assembly"], status=entry["status"], flushed=entry["flush_info"]["is_flushed"], reason=entry["flush_info"]["reason"])
+        return _if_stage_snapshot(entry["pc"], entry["raw_instruction"], decoded["assembly"], status=entry["status"], flushed=entry["flush_info"]["is_flushed"], reason=entry["flush_info"]["reason"])
     if stage_name == "ID":
-        return _id_stage_snapshot(decoded, entry["rs1_val"], entry["rs2_val"], status=entry["status"])
+        return _id_stage_snapshot(
+            decoded,
+            entry["rs1_val"],
+            entry["rs2_val"],
+            status=entry["status"],
+            has_stall=entry.get("stall_desc") is not None,
+            stall_reason=entry.get("stall_reason"),
+            stall_desc=entry.get("stall_desc"),
+        )
     if stage_name == "EX":
         if entry["alu"] is not None:
             alu = entry["alu"]
@@ -178,7 +248,13 @@ def _snapshot_stage(stage_name: str, entry: Optional[dict]) -> dict:
                 "operand2": entry["rs2_val"] if entry["rs2_val"] is not None else 0,
                 "alu_result": 0,
             }
-        return _ex_stage_snapshot(decoded, alu, status=entry["status"])
+        return _ex_stage_snapshot(
+            decoded,
+            alu,
+            forwarding_info=entry.get("forwarding_info"),
+            status=entry["status"],
+            forwarding_desc=entry.get("forwarding_desc"),
+        )
     if stage_name == "MEM":
         return _mem_stage_snapshot(decoded, entry["alu"]["alu_result"], entry["mem_read_data"], entry["mem_write_data"], status=entry["status"], flush_info=entry["flush_info"])
     if stage_name == "WB":
@@ -187,6 +263,103 @@ def _snapshot_stage(stage_name: str, entry: Optional[dict]) -> dict:
         "assembly": decoded["assembly"],
         "status": entry["status"],
     }
+
+
+def _is_writeback_candidate(entry: Optional[dict]) -> bool:
+    return bool(entry and entry["decoded"]["reg_write"] and entry["decoded"]["rd"] != 0)
+
+
+def _detect_pipeline_stall(state: dict, pipeline: dict) -> Optional[dict]:
+    if state["mode"] != "pipeline":
+        return None
+
+    id_entry = pipeline["ID"]
+    if id_entry is None or id_entry["decoded"]["op"] == "nop":
+        return None
+
+    rs1 = id_entry["decoded"]["rs1"]
+    rs2 = id_entry["decoded"]["rs2"]
+
+    if state["forwarding_enabled"]:
+        ex_entry = pipeline["EX"]
+        if ex_entry is not None and ex_entry["decoded"]["mem_read"] and _is_writeback_candidate(ex_entry):
+            rd = ex_entry["decoded"]["rd"]
+            if rd in (rs1, rs2):
+                return {
+                    "stall_reason": "load_use",
+                    "stall_desc": "데이터 의존성(앞선 명령어의 결과 미반영)으로 인해 파이프라인이 1클록 정지(Stall)되었으며 EX 단계에 버블을 주입했습니다.",
+                }
+    else:
+        for stage_name in ("EX", "MEM", "WB"):
+            entry = pipeline[stage_name]
+            if _is_writeback_candidate(entry):
+                rd = entry["decoded"]["rd"]
+                if rd in (rs1, rs2):
+                    return {
+                        "stall_reason": "strict_dependency",
+                        "stall_desc": "데이터 의존성(앞선 명령어의 결과 미반영)으로 인해 파이프라인이 1클록 정지(Stall)되었으며 EX 단계에 버블을 주입했습니다.",
+                    }
+    return None
+
+
+def _compute_forwarding(state: dict, ex_entry: dict, mem_entry: Optional[dict], wb_entry: Optional[dict]) -> None:
+    if ex_entry is None or ex_entry["decoded"]["op"] == "nop":
+        return
+
+    forwarding_info = {
+        "has_forwarded": False,
+        "forwarded_from": [],
+        "forwarded_to": [],
+        "target_register": [],
+        "forwarded_value": [],
+    }
+    descriptions = []
+
+    def try_forward(source_entry: Optional[dict], reg_num: int) -> Optional[int]:
+        if not _is_writeback_candidate(source_entry):
+            return None
+        if source_entry["decoded"]["rd"] != reg_num:
+            return None
+        if source_entry["write_val"] is not None:
+            return source_entry["write_val"]
+        if source_entry["alu"] is not None:
+            return source_entry["alu"]["alu_result"]
+        return None
+
+    for operand in ("rs1", "rs2"):
+        reg_num = ex_entry["decoded"][operand]
+        if reg_num == 0:
+            continue
+
+        forwarded_value = None
+        source = None
+        if mem_entry is not None:
+            forwarded_value = try_forward(mem_entry, reg_num)
+            if forwarded_value is not None:
+                source = "EX/MEM"
+        if forwarded_value is None and wb_entry is not None:
+            forwarded_value = try_forward(wb_entry, reg_num)
+            if forwarded_value is not None:
+                source = "MEM/WB"
+
+        if forwarded_value is not None and source is not None:
+            if operand == "rs1":
+                ex_entry["rs1_val"] = forwarded_value
+            else:
+                ex_entry["rs2_val"] = forwarded_value
+            forwarding_info["has_forwarded"] = True
+            forwarding_info["forwarded_from"].append(source)
+            forwarding_info["forwarded_to"].append(operand)
+            forwarding_info["target_register"].append(register_name(reg_num))
+            forwarding_info["forwarded_value"].append(_hex32(forwarded_value))
+            descriptions.append(
+                f"{source} 버퍼에 대기 중인 {register_name(reg_num)} 레지스터의 최신 값({_hex32(forwarded_value)})을 EX 단계의 {operand} 입력값으로 우회 공급(Forwarding)했습니다."
+            )
+            state["stats"]["forwards"] += 1
+
+    if forwarding_info["has_forwarded"]:
+        ex_entry["forwarding_info"] = forwarding_info
+        ex_entry["forwarding_desc"] = " ".join(descriptions)
 
 
 def _handle_ecall(state: dict) -> None:
@@ -231,19 +404,21 @@ def core_single_tick(user_id: str) -> Optional[dict]:
     branch_flush = False
     flush_reason = None
 
-    # Commit WB stage.
     wb_entry = pipeline["WB"]
-    if wb_entry is not None:
+    if wb_entry is not None and wb_entry["decoded"]["op"] != "nop":
         decoded = wb_entry["decoded"]
         if decoded["reg_write"] and decoded["rd"] != 0 and wb_entry["write_val"] is not None:
             state["regs"][decoded["rd"]] = wb_entry["write_val"]
         if decoded["op"] == "ecall":
             _handle_ecall(state)
         state["stats"]["instructions_executed"] += 1
+        if state["mode"] == "single" and decoded["reg_write"] and decoded["rd"] != 0:
+            state["recent_rds"].append(decoded["rd"])
+            if len(state["recent_rds"]) > 2:
+                state["recent_rds"] = state["recent_rds"][-2:]
 
-    # Execute MEM stage.
     mem_entry = pipeline["MEM"]
-    if mem_entry is not None:
+    if mem_entry is not None and mem_entry["decoded"]["op"] != "nop":
         decoded = mem_entry["decoded"]
         alu_result = mem_entry["alu"]["alu_result"]
         if decoded["mem_read"]:
@@ -253,9 +428,16 @@ def core_single_tick(user_id: str) -> Optional[dict]:
             mem_entry["mem_write_data"] = mem_entry["rs2_val"]
             store_word(state["dmem"], alu_result, mem_entry["mem_write_data"])
 
-    # Execute EX stage.
+    id_entry = pipeline["ID"]
+    if id_entry is not None and id_entry["decoded"]["op"] != "nop":
+        decoded = id_entry["decoded"]
+        id_entry["rs1_val"] = state["regs"][decoded["rs1"]]
+        id_entry["rs2_val"] = state["regs"][decoded["rs2"]]
+
     ex_entry = pipeline["EX"]
-    if ex_entry is not None:
+    if ex_entry is not None and ex_entry["decoded"]["op"] != "nop":
+        if state["forwarding_enabled"]:
+            _compute_forwarding(state, ex_entry, mem_entry, wb_entry)
         decoded = ex_entry["decoded"]
         alu = execute(decoded, ex_entry["rs1_val"], ex_entry["rs2_val"])
         ex_entry["alu"] = alu
@@ -282,41 +464,58 @@ def core_single_tick(user_id: str) -> Optional[dict]:
             branch_flush = True
             flush_reason = "control_hazard_branch_taken"
 
-    # Execute ID stage.
-    id_entry = pipeline["ID"]
-    if id_entry is not None:
-        decoded = id_entry["decoded"]
-        id_entry["rs1_val"] = state["regs"][decoded["rs1"]]
-        id_entry["rs2_val"] = state["regs"][decoded["rs2"]]
+    stall_info = _detect_pipeline_stall(state, pipeline)
 
-    # Fetch stage: single mode fetch only when pipeline is empty, pipeline mode fetch whenever IF is empty.
     fetch_entry = None
-    if not state["halt_requested"]:
-        if state["mode"] == "single":
-            if not _has_active_pipeline(state):
-                fetch_entry = _fetch_pipeline_entry(state)
+    if not state["halt_requested"] and state["mode"] == "pipeline":
+        if branch_flush:
+            fetch_entry = None
+        elif stall_info:
+            fetch_entry = pipeline["IF"]
         else:
-            if pipeline["IF"] is None:
-                fetch_entry = _fetch_pipeline_entry(state)
+            fetch_entry = _fetch_pipeline_entry(state)
+    elif not state["halt_requested"] and state["mode"] == "single":
+        if not _has_active_pipeline(state):
+            fetch_entry = _fetch_pipeline_entry(state)
 
-    if branch_flush:
-        if pipeline["IF"] is not None:
-            pipeline["IF"]["status"] = "flushed"
-            pipeline["IF"]["flush_info"] = {"is_flushed": True, "reason": flush_reason}
-        if pipeline["ID"] is not None:
-            pipeline["ID"]["status"] = "flushed"
-            pipeline["ID"]["flush_info"] = {"is_flushed": True, "reason": flush_reason}
-        fetch_entry = None
+    if stall_info is not None:
+        stall_bubble = _make_pipeline_bubble("bubble", "stalled", stall_reason=stall_info["stall_reason"], stall_desc=stall_info["stall_desc"])
+        state["stats"]["stalls"] += 1
+        state["stats"]["data_hazards"] += 1
+        new_pipeline = {
+            "WB": pipeline["MEM"],
+            "MEM": pipeline["EX"],
+            "EX": stall_bubble,
+            "ID": pipeline["ID"],
+            "IF": pipeline["IF"],
+        }
+    elif branch_flush:
+        new_pipeline = {
+            "WB": pipeline["MEM"],
+            "MEM": pipeline["EX"],
+            "EX": _make_pipeline_bubble("nop", "flushed", flush_reason=flush_reason),
+            "ID": _make_pipeline_bubble("nop", "flushed", flush_reason=flush_reason),
+            "IF": None,
+        }
+    else:
+        new_pipeline = {
+            "WB": pipeline["MEM"],
+            "MEM": pipeline["EX"],
+            "EX": pipeline["ID"],
+            "ID": pipeline["IF"],
+            "IF": fetch_entry,
+        }
 
-    # Advance pipeline registers.
-    new_pipeline = {
-        "WB": pipeline["MEM"],
-        "MEM": pipeline["EX"],
-        "EX": pipeline["ID"],
-        "ID": pipeline["IF"],
-        "IF": fetch_entry,
-    }
     state["pipeline_regs"] = new_pipeline
+
+    virtual_hazard_alert = None
+    if state["mode"] == "single":
+        id_snapshot_entry = state["pipeline_regs"]["ID"]
+        if id_snapshot_entry is not None and id_snapshot_entry["decoded"]["op"] != "nop":
+            rs1 = id_snapshot_entry["decoded"]["rs1"]
+            rs2 = id_snapshot_entry["decoded"]["rs2"]
+            if rs1 in state["recent_rds"] or rs2 in state["recent_rds"]:
+                virtual_hazard_alert = "💡 파이프라인 모드 구동 예습: 만약 파이프라인 모드였다면, 앞선 명령어와의 데이터 의존성 때문에 여기서 데이터 하자드(충돌)가 발생했을 구간입니다."
 
     if not _has_active_pipeline(state) and state["pc"] not in state["imem"] and not state["halt_requested"]:
         state["status"] = "halted"
@@ -337,6 +536,8 @@ def core_single_tick(user_id: str) -> Optional[dict]:
         "wb_stage": _snapshot_stage("WB", state["pipeline_regs"]["WB"]),
         "global_result": _snapshot_global(state),
     }
+    if virtual_hazard_alert is not None:
+        snapshot["virtual_hazard_alert"] = virtual_hazard_alert
 
     state["history"].append(snapshot)
     state["stats"]["total_cycles"] += 1

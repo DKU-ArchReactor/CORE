@@ -61,4 +61,4 @@ def test_flush_tagging_for_jal():
 
     assert snapshot["buffers"]["ID"]["flush_info"]["is_flushed"] is True
     assert snapshot["buffers"]["ID"]["flush_info"]["reason"] == "control_hazard_branch_taken"
-    assert snapshot["id_stage"]["assembly"] == "addi zero, zero, 0"
+    assert snapshot["id_stage"]["assembly"] == "nop"

@@ -91,6 +91,8 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single") -> dict:
         "status": "ready",
         "halt_requested": False,
         "console_output": "",
+        "forwarding_enabled": True,
+        "recent_rds": [],
         "stats": {
             "total_cycles": 0,
             "instructions_executed": 0,
