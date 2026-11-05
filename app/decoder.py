@@ -223,10 +223,4 @@ def decode(raw_word: int) -> Dict[str, object]:
     else:
         raise ValueError(f"지원하지 않는 명령어: opcode={opcode:07b}, funct3={funct3:03b}, funct7={funct7:07b}")
 
-    # Unused bit fields are not register reads. In I/U/J encodings these
-    # bits belong to the immediate and must not trigger stalls/forwarding.
-    if opcode not in (0b0110011, 0b0010011, 0b0000011, 0b0100011, 0b1100011, 0b1100111):
-        result["rs1"] = 0
-    if opcode not in (0b0110011, 0b0100011, 0b1100011):
-        result["rs2"] = 0
     return result

@@ -7,13 +7,11 @@ Backend에서 직접 함수 호출로 접근하므로 직렬화 오버헤드가 
 """
 
 from io import BytesIO
-from hashlib import sha256
 from typing import Optional
 
 from elftools.elf.elffile import ELFFile
 
 from app.validator import validate_program
-from app.decoder import decode
 
 # 모든 사용자의 CPU 상태를 담는 단일 진실 소스
 GLOBAL_DICT = {}
@@ -91,8 +89,6 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate:
         mode: 실행 모드 ("single" | "pipeline")
         validate: 실행 전 instruction 지원 범위 검증 여부
     """
-    if mode not in ("single", "pipeline"):
-        raise ValueError(f"Unsupported simulation mode: {mode}")
     if validate:
         validate_program(elf_bytes, raise_on_error=True)
 
@@ -119,6 +115,7 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate:
         "halt_requested": False,
         "console_output": "",
         "forwarding_enabled": True,
+        "recent_rds": [],
         "stats": {
             "total_cycles": 0,
             "instructions_executed": 0,
@@ -136,35 +133,6 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate:
             "WB": None,
         },
     }
-
-    # Preserve the pre-execution state and loaded ELF layout for consumers.
-    state["initial_state"] = {
-        "current_pc": f"0x{entry_point:08X}",
-        "registers": {f"x{i}": f"0x{value:08X}" for i, value in enumerate(state["regs"])},
-        "memory_snapshot": {f"0x{addr:08X}": f"0x{value:08X}" for addr, value in dmem.items()},
-        "console_output": "",
-        "metrics": {"accumulated_instructions": 0, "accumulated_stalls": 0, "accumulated_forwards": 0},
-    }
-    state["program_metadata"] = {
-        "fingerprint": sha256(elf_bytes).hexdigest(),
-        "instructions": [
-            {"pc": f"0x{pc:08X}", "raw_instruction": f"0x{raw:08X}", "assembly": decode(raw)["assembly"]}
-            for pc, raw in sorted(imem.items())
-        ] if validate else [],
-        "memory_regions": [],
-        "initial_stack_pointer": f"0x{DEFAULT_STACK_POINTER:08X}",
-    }
-    if elf_bytes.startswith(b"\x7fELF"):
-        elf = ELFFile(BytesIO(elf_bytes))
-        for section in elf.iter_sections():
-            if section["sh_flags"] & 2 and section["sh_size"]:
-                start = section["sh_addr"]
-                state["program_metadata"]["memory_regions"].append({
-                    "name": section.name,
-                    "start": f"0x{start:08X}",
-                    "end_exclusive": f"0x{start + section['sh_size']:08X}",
-                    "kind": "code" if section["sh_flags"] & 4 else ("bss" if section["sh_type"] == "SHT_NOBITS" else "data"),
-                })
 
     GLOBAL_DICT[user_id] = state
     return state

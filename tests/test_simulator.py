@@ -47,7 +47,7 @@ def test_run_simulation_single_mode():
 
     assert result["schema_version"] == "1.0"
     assert result["simulator"]["mode"] == "single"
-    assert result["simulator"]["pipeline_model"] == "single-cycle"
+    assert result["simulator"]["pipeline_model"] == "5-stage-in-order"
     assert result["program"]["entry_point"] == "0x00000000"
     assert result["program"]["instruction_words"] == 1
     assert result["status"] in ("halted", "success", "error")
@@ -233,6 +233,7 @@ def test_flush_tagging_for_jal():
     nop = (0x00000013).to_bytes(4, "little")
     create_state("u2", jal + nop, mode="pipeline")
 
+    core_single_tick("u2")
     core_single_tick("u2")
     core_single_tick("u2")
     snapshot = core_single_tick("u2")
