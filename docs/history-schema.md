@@ -2,7 +2,7 @@
 
 This document defines the current JSON result contract returned by `run_simulation()`.
 
-The schema is intentionally descriptive rather than minimal. ArchReactor is an educational simulator, so each cycle must explain what happened in pipeline terms.
+Each cycle describes the work performed by the selected execution engine and the resulting architectural state.
 
 ## Top-Level Result
 
@@ -23,6 +23,7 @@ Fields:
 - `schema_version`: schema contract version for frontend/backend compatibility
 - `simulator`: simulator configuration metadata
 - `program`: loaded program metadata
+- `initial_state`: architectural state before the first clock (same shape as `global_result`)
 - `status`: `ready`, `halted`, or `error`
 - `summary`: accumulated execution counters
 - `history`: ordered list of per-cycle snapshots
@@ -38,6 +39,12 @@ Fields:
 }
 ```
 
+For `mode = "single"`, `pipeline_model` is `"single-cycle"`. For
+`mode = "pipeline"`, it is `"5-stage-in-order"`.
+
+Pipeline IF runs on the first clock; no empty setup clock is included.
+N independent instructions with no redirects or stalls take N+4 clocks.
+
 ## Program Metadata
 
 ```json
@@ -50,27 +57,39 @@ Fields:
 
 ## Summary
 
+Program metadata additionally includes `fingerprint` (SHA-256 of input ELF/raw
+bytes), `instructions` (actual PC, raw word, decoded assembly),
+`memory_regions` (ELF section name, start, exclusive end, kind), and
+`initial_stack_pointer`. `data_words` counts initially loaded data words,
+not words created by stores during execution. Raw programs have no ELF regions.
+
 ```json
 {
-  "total_cycles": 135,
+  "total_cycles": 134,
   "instructions_executed": 97,
   "data_hazards": 9,
   "control_hazards": 8,
   "stalls": 9,
   "forwards": 44,
-  "executed_cycles": 135
+  "executed_cycles": 134
 }
 ```
 
 Counter meanings:
 
 - `total_cycles`: simulator clock count
-- `instructions_executed`: non-bubble instructions retired at WB
+- `instructions_executed`: successfully completed instructions (at WB in pipeline mode); faulting instructions do not retire
 - `data_hazards`: data hazards that caused stalls
 - `control_hazards`: taken branch/jump redirects that flushed younger instructions
 - `stalls`: inserted stall bubbles
 - `forwards`: forwarded operand count, not cycle count
 - `executed_cycles`: length of `history`
+
+In single mode, each successfully completed instruction takes one clock, and
+`data_hazards`, `control_hazards`, `stalls`, and `forwards` remain zero. A faulting
+instruction contributes a clock/history entry but does not increment
+`instructions_executed`. Taken single-mode branches still emit control-flow
+events; they do not cause pipeline flushes or bubbles.
 
 ## Cycle Snapshot
 
@@ -91,12 +110,28 @@ Each item in `history` has:
 }
 ```
 
-There are two stage views:
+In pipeline mode there are two stage views:
 
 - `stage_activity`: what each stage did during this clock before pipeline registers advanced
 - `if_stage` through `wb_stage`: compatibility view of stage contents after pipeline registers advanced
 
 Prefer `stage_activity` and `cycle_events` for teaching UI.
+
+In single mode, all five `stage_activity` entries describe the **same**
+instruction completed during that clock. `if_stage` through `wb_stage` expose
+the corresponding activity, and all `buffers` entries are `null`. A fault
+leaves stages after the fault empty. `global_result` includes the completed
+instruction's register/memory writes in that same history entry.
+
+Do not select a completed instruction by searching `buffers.WB`: in pipeline
+mode that buffer contains next-clock work, and in single mode it is empty.
+Single-mode consumers should step through `history` in order and use
+`if_stage.pc` to identify the dynamic instruction. Static assembly line counts
+cannot represent repeated loop iterations, skipped branches, or function calls.
+
+History snapshots are detached from live CPU/pipeline dictionaries; advancing
+the simulator does not modify earlier snapshots. Calling `core_single_tick()`
+after halt/error returns `null` (Python `None`) without further execution.
 
 ## Buffers
 
@@ -251,7 +286,7 @@ When forwarding is enabled, current stall reason:
 
 When forwarding is disabled:
 
-- `strict_dependency`: ID depends on a writeback candidate still in EX/MEM/WB
+- `strict_dependency`: ID depends on a writeback candidate still in EX/MEM; WB writes before ID reads
 
 ### Forwarding
 
@@ -329,6 +364,11 @@ Current runtime error codes:
 
 - `MEMORY_ALIGNMENT_ERROR`
 - `RUNTIME_ERROR`
+- `INSTRUCTION_ALIGNMENT_ERROR`
+
+Errors stop execution immediately. This educational model does not drain older
+in-flight instructions after an EX-stage error, and does not model precise
+architectural exception delivery.
 
 ## Global Result
 
