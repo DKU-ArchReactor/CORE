@@ -28,6 +28,7 @@ It is not a full RISC-V machine emulator. The supported subset is intentionally 
 - `app/pipeline_engine.py`: 5-stage execution, stalls, forwarding, and flushes
 - `app/engine_common.py`: shared instruction semantics and clock-history snapshots
 - `app/validator.py`: pre-simulation instruction support validation
+- `server/grpc_server.py`: BE-compatible `archreactor.v1` adapter with isolated workers
 - `tests/tester.py`: CLI runner that writes `simulation_result.json`
 
 ## Quick Check
@@ -144,6 +145,9 @@ python tests/tester.py --input tests/program2.elf --mode pipeline --history
 ```
 
 ## Docker
+
+For the independent gRPC service and its API contract, see
+[server setup](docs/grpc-server.md). The following image runs the engine tests.
 
 The Dockerfile is for test/CI-style execution of the Python core:
 
