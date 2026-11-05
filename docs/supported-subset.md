@@ -116,14 +116,6 @@ Word and halfword alignment is enforced:
 
 Alignment errors are recorded in `cycle_events.runtime_error` and stop the simulation with `status = "error"`.
 
-## Single-Cycle Model
-
-Single mode uses a separate engine. One clock fetches, decodes, executes,
-accesses memory, and writes back one instruction before the next instruction
-reads the register file. Branches and jumps select the next PC in that clock;
-they do not insert bubbles. No pipeline buffer, stall, or forwarding logic is
-used. A runtime error stops the instruction before it retires.
-
 ## Pipeline Model
 
 Pipeline mode models a 5-stage in-order pipeline:
@@ -141,13 +133,6 @@ Current assumptions:
 - Not-taken branches are recorded but do not flush.
 - Load-use hazards introduce a 1-cycle stall with forwarding enabled.
 - EX/MEM and MEM/WB forwarding are modeled and recorded per operand.
-- WB writes before ID reads; a completed WB is not a reason to stall ID.
-- The first clock performs IF. N independent instructions take N+4 clocks.
-- Taken instruction targets must be 4-byte aligned (RV32IM without compressed instructions).
-- A taken redirect overrides stalls detected on wrong-path instructions.
-- A halt or runtime error at WB prevents younger instructions from accessing memory or retiring.
-- Unused instruction encoding fields do not create register dependencies.
-- Effective memory addresses and next-PC calculations wrap to 32 bits.
 
 Cycle history separates:
 

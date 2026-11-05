@@ -23,10 +23,7 @@ It is not a full RISC-V machine emulator. The supported subset is intentionally 
 - `app/executor.py`: ALU and branch operation semantics
 - `app/memory.py`: word, halfword, and byte memory access
 - `app/state.py`: ELF/raw program loading and CPU state creation
-- `app/simulator.py`: public simulation API and mode dispatch
-- `app/single_cycle_engine.py`: one complete instruction per clock, without pipeline buffers
-- `app/pipeline_engine.py`: 5-stage execution, stalls, forwarding, and flushes
-- `app/engine_common.py`: shared instruction semantics and clock-history snapshots
+- `app/simulator.py`: single and pipeline simulation, cycle history, hazard events
 - `app/validator.py`: pre-simulation instruction support validation
 - `tests/tester.py`: CLI runner that writes `simulation_result.json`
 
@@ -92,19 +89,6 @@ See `examples/README.md` for usage.
 
 - `docs/supported-subset.md`: supported ISA, syscall subset, memory model, pipeline assumptions, recommended C subset
 - `docs/history-schema.md`: JSON result and cycle history schema for UI/backend consumers
-- `docs/engine-verification.md`: engine separation, regression coverage, and frontend integration requirements
-
-## Execution Modes
-
-`single` executes one instruction through IF/ID/EX/MEM/WB within one clock.
-Each history entry contains that instruction's stage activity and its completed
-register/memory state. There are no pipeline stalls, forwarding, flush bubbles,
-or pipeline buffers in this mode.
-
-`pipeline` advances overlapping instructions through five stages. Use
-`stage_activity` for work performed during the clock and `buffers` for pipeline
-contents after the clock. A populated WB buffer means an instruction is waiting
-for writeback on the next clock, not that its register write has completed.
 
 ## Simulation History
 
