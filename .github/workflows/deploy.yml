@@ -1,0 +1,82 @@
+name: Deploy CORE to ECS
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      rollback_digest:
+        description: 'Optional previous sha256 digest from a successful deployment record'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  deploy:
+    if: github.repository == 'DKU-ArchReactor/CORE' && github.ref == 'refs/heads/develop'
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-2
+      AWS_EC2_METADATA_DISABLED: 'true'
+      ROLLBACK_DIGEST: ${{ inputs.rollback_digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install deployment dependencies
+        run: python -m pip install -r requirements-deploy.txt
+      - name: Authenticate with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::242925688392:role/archreactor-core-github-deploy
+          aws-region: ap-northeast-2
+          allowed-account-ids: '242925688392'
+          role-session-name: core-${{ github.run_id }}
+          role-duration-seconds: 3600
+      - name: Build and deploy CORE image
+        run: |
+          args=(--github-actions)
+          if [ -n "$ROLLBACK_DIGEST" ]; then
+            args+=(--rollback "$ROLLBACK_DIGEST")
+          fi
+          python scripts/deploy.py "${args[@]}"
+      - name: Verify public BE to CORE integration
+        run: |
+          VERSION=$(python -c 'import json; print(json.load(open("dist/deployment.json"))["version"])')
+          PHASE=after
+          if [ -n "$ROLLBACK_DIGEST" ]; then PHASE=before; fi
+          python scripts/verify-public-api.py --phase "$PHASE" --expected-version "$VERSION"
+      - name: Publish deployment summary
+        if: always()
+        run: |
+          if [ -f dist/deployment.json ]; then
+            printf '\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+            cat dist/deployment.json >> "$GITHUB_STEP_SUMMARY"
+            printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Keep deployment and rollback records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/deployment.json
+            dist/public-api-*.json
+          if-no-files-found: ignore
+          retention-days: 30

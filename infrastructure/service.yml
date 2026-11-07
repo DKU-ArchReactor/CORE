@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CORE gRPC on Fargate with private service discovery, BE-only ingress and independent image rollbacks.
+Metadata:
+  AWSToolsMetrics: {AWSAgentToolkit: aws-cloudformation@3}
+Parameters:
+  VpcId: {Type: 'AWS::EC2::VPC::Id'}
+  SubnetId: {Type: 'AWS::EC2::Subnet::Id'}
+  BackendSecurityGroup: {Type: 'AWS::EC2::SecurityGroup::Id'}
+  Image:
+    Type: String
+    AllowedPattern: '242925688392\.dkr\.ecr\.ap-northeast-2\.amazonaws\.com/capstone/archreactor-core@sha256:[a-f0-9]{64}'
+  NamespaceName: {Type: String, Default: archreactor.internal}
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: archreactor-simulator
+  Logs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/archreactor-simulator
+      RetentionInDays: 14
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: allow direct HTTP2 gRPC only from existing BE instances; outbound HTTPS permits ECR and logs without NAT
+        must: [Never open ingress to internet, Keep separate from BE and database security groups]
+    Properties:
+      GroupDescription: CORE gRPC from backend only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 50051
+          ToPort: 50051
+          SourceSecurityGroupId: !Ref BackendSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+  Namespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Ref NamespaceName
+      Vpc: !Ref VpcId
+      Description: Private CORE service discovery
+  Discovery:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: simulator
+      NamespaceId: !Ref Namespace
+      DnsConfig:
+        RoutingPolicy: MULTIVALUE
+        DnsRecords: [{Type: A, TTL: 10}]
+      HealthCheckCustomConfig: {FailureThreshold: 1}
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Fargate image pulls and logs; CORE computation has no AWS API role or secrets
+        must: [Allow pulls only from the CORE repository]
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: {aws:SourceAccount: !Ref 'AWS::AccountId'}
+              ArnLike: {aws:SourceArn: !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*'}
+      Policies:
+        - PolicyName: core-runtime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/capstone/archreactor-core
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt Logs.Arn
+  Task:
+    Type: AWS::ECS::TaskDefinition
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: bounded isolated simulator; immutable digest allows deterministic rollout and rollback
+        must: [No native execution of uploaded ELF, Non-root process and read-only root filesystem]
+    Properties:
+      Family: archreactor-simulator
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      RuntimePlatform: {CpuArchitecture: X86_64, OperatingSystemFamily: LINUX}
+      ContainerDefinitions:
+        - Name: core
+          Image: !Ref Image
+          Essential: true
+          User: '10001'
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            InitProcessEnabled: true
+            Capabilities: {Drop: [ALL]}
+          PortMappings: [{ContainerPort: 50051, Protocol: tcp, AppProtocol: grpc}]
+          StopTimeout: 30
+          HealthCheck:
+            Command: [CMD, python, -m, service.healthcheck]
+            Interval: 15
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 20
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref Logs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: core
+              mode: non-blocking
+              max-buffer-size: 1m
+  Service:
+    Type: AWS::ECS::Service
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: no load balancer or NAT fixed charge for demo; DNS advertises only private task IPs
+        must: [Public IP is outbound-only via SG, Do not modify archreactor-core Beanstalk environment, Keep desired count at least one]
+    Properties:
+      ServiceName: archreactor-simulator
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref Task
+      LaunchType: FARGATE
+      PlatformVersion: '1.4.0'
+      DesiredCount: 1
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker: {Enable: true, Rollback: true}
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: [!Ref SubnetId]
+          SecurityGroups: [!Ref SecurityGroup]
+      ServiceRegistries:
+        - RegistryArn: !GetAtt Discovery.Arn
+Outputs:
+  GrpcTarget:
+    Description: BE CORE_GRPC_TARGET; private VPC DNS only
+    Value: !Sub simulator.${NamespaceName}:50051
+  TaskDefinition:
+    Description: Current independent CORE revision
+    Value: !Ref Task
+  CoreSecurityGroup:
+    Description: BE-only ingress group
+    Value: !Ref SecurityGroup

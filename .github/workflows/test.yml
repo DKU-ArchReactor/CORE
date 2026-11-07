@@ -1,0 +1,37 @@
+name: CORE CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-ci.txt
+      - name: Verify gRPC wire compatibility and generated code
+        run: python scripts/check-contract.py
+      - name: Test engine, gRPC service and deployment safeguards
+        run: pytest -q
+      - name: Build production container
+        run: docker build --platform linux/amd64 -f Dockerfile.server --build-arg CORE_VERSION=ci -t core-ci .
+      - name: Test single and pipeline over gRPC
+        run: |
+          docker run -d --read-only --cap-drop ALL --name core-smoke -p 127.0.0.1:50051:50051 core-ci
+          timeout 45 sh -c 'until docker exec core-smoke python -m service.healthcheck; do sleep 1; done'
+          python scripts/smoke.py 127.0.0.1:50051
+      - name: Stop test container
+        if: always()
+        run: docker rm -f core-smoke || true

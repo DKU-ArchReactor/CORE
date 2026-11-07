@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GitHub OIDC deployment role restricted to the CORE develop branch and existing simulator resources.
+Metadata:
+  AWSToolsMetrics: {AWSAgentToolkit: aws-cloudformation@3}
+Parameters:
+  CoreExecutionRoleArn:
+    Type: String
+    AllowedPattern: 'arn:aws:iam::242925688392:role/archreactor-simulator-service-ExecutionRole-[A-Za-z0-9]+'
+    Description: Existing Fargate execution role from the simulator service stack.
+Resources:
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: short-lived GitHub credentials for independently deploying the existing simulator
+        must:
+          - Trust only CORE develop and the STS audience
+          - No IAM mutation, BE deployment, secret access or network mutation permissions
+          - Pass only the existing CORE execution role to ECS tasks
+    Properties:
+      RoleName: archreactor-core-github-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: repo:DKU-ArchReactor/CORE:ref:refs/heads/develop
+      Policies:
+        - PolicyName: core-deployment
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: UploadCoreSource
+                Effect: Allow
+                Action: [s3:PutObject, s3:AbortMultipartUpload]
+                Resource: !Sub arn:${AWS::Partition}:s3:::elasticbeanstalk-${AWS::Region}-${AWS::AccountId}/core-source/*
+              - Sid: BuildOnlyCore
+                Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource: !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/archreactor-core-image-build
+              - Sid: ReadCoreImages
+                Effect: Allow
+                Action: ecr:DescribeImages
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/capstone/archreactor-core
+              - Sid: UpdateExistingCoreStack
+                Effect: Allow
+                Action: [cloudformation:DescribeStacks, cloudformation:CreateChangeSet, cloudformation:DescribeChangeSet, cloudformation:ExecuteChangeSet]
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/archreactor-simulator-service/*
+              - Sid: DescribeCoreServiceAndTasks
+                Effect: Allow
+                Action: [ecs:DescribeServices, ecs:UpdateService]
+                Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/archreactor-simulator/archreactor-simulator
+              - Sid: DescribeRunningCoreTasks
+                Effect: Allow
+                Action: ecs:DescribeTasks
+                Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task/archreactor-simulator/*
+              - Sid: ListCoreTasks
+                Effect: Allow
+                Action: ecs:ListTasks
+                Resource: '*'
+                Condition:
+                  ArnEquals:
+                    ecs:cluster: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/archreactor-simulator
+              # These APIs do not support resource-level permissions. PassRole remains restricted.
+              - Sid: TaskDefinitionReadAndCleanup
+                Effect: Allow
+                Action: [ecs:DeregisterTaskDefinition, ecs:DescribeTaskDefinition]
+                Resource: '*'
+                Condition:
+                  StringEquals: {aws:RequestedRegion: ap-northeast-2}
+              - Sid: ManageCoreTaskRevisions
+                Effect: Allow
+                Action: [ecs:RegisterTaskDefinition, ecs:TagResource, ecs:UntagResource, ecs:ListTagsForResource]
+                Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/archreactor-simulator:*
+              - Sid: ReadCoreServiceTags
+                Effect: Allow
+                Action: ecs:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/archreactor-simulator/archreactor-simulator
+              - Sid: PassCoreExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Ref CoreExecutionRoleArn
+                Condition:
+                  StringEquals: {iam:PassedToService: ecs-tasks.amazonaws.com}
+Outputs:
+  RoleArn:
+    Description: Role used by the CORE deploy workflow.
+    Value: !GetAtt GitHubDeployRole.Arn

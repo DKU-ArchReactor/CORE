@@ -1,0 +1,20 @@
+let role = Resources.GitHubDeployRole.Properties
+
+rule core_oidc_identity {
+  %role.RoleName == "archreactor-core-github-deploy"
+  %role.MaxSessionDuration == 3600
+  %role.AssumeRolePolicyDocument.Statement[*] {
+    Effect == "Allow"
+    Action == "sts:AssumeRoleWithWebIdentity"
+    Principal.Federated exists
+    Principal.AWS !exists
+    Condition.StringEquals."token.actions.githubusercontent.com:aud" == "sts.amazonaws.com"
+    Condition.StringEquals."token.actions.githubusercontent.com:sub" == "repo:DKU-ArchReactor/CORE:ref:refs/heads/develop"
+  }
+  %role.ManagedPolicyArns !exists
+  %role.Policies[*].PolicyDocument.Statement[*] {
+    Effect == "Allow"
+    Action[*] != "*"
+    Action[*] != "iam:*"
+  }
+}

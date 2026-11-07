@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-server.txt
+-r requirements-contract.txt
+-r requirements-deploy.txt

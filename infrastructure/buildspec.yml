@@ -1,0 +1,22 @@
+version: 0.2
+phases:
+  install:
+    runtime-versions: {python: 3.12}
+    commands:
+      - pip install -r requirements-ci.txt
+  pre_build:
+    commands:
+      - python scripts/check-contract.py
+      - pytest -q
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "${REPOSITORY_URI%%/*}"
+  build:
+    commands:
+      - docker build --platform linux/amd64 -f Dockerfile.server --build-arg CORE_VERSION="$IMAGE_TAG" -t "$REPOSITORY_URI:$IMAGE_TAG" .
+      - docker run -d --read-only --cap-drop ALL --name core-smoke -p 127.0.0.1:50051:50051 "$REPOSITORY_URI:$IMAGE_TAG"
+      - timeout 30 sh -c 'until docker exec core-smoke python -m service.healthcheck; do sleep 1; done'
+      - python scripts/smoke.py 127.0.0.1:50051
+      - docker rm -f core-smoke
+  post_build:
+    commands:
+      - test "$CODEBUILD_BUILD_SUCCEEDING" = 1
+      - docker push "$REPOSITORY_URI:$IMAGE_TAG"

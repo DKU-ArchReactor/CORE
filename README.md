@@ -30,6 +30,13 @@ It is not a full RISC-V machine emulator. The supported subset is intentionally 
 - `app/validator.py`: pre-simulation instruction support validation
 - `tests/tester.py`: CLI runner that writes `simulation_result.json`
 
+## Service deployment
+
+Pull requests run engine, gRPC contract and container checks. Changes pushed or merged
+to `develop` deploy the CORE gRPC service to the existing ECS service in Seoul using
+GitHub OIDC and CodeBuild. See [deployment and rollback](docs/grpc-deployment.md)
+for setup, status artifacts and recovery instructions.
+
 ## Quick Check
 
 Run the full local verification suite:
