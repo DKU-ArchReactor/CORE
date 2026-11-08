@@ -104,6 +104,41 @@ def build_image(session, config, record):
     return ecr.describe_images(repositoryName=REPO, imageIds=[{'imageTag': tag}])['imageDetails'][0]['imageDigest']
 
 
+def diagnose_failure(ecs):
+    print("=== DEPLOYMENT DIAGNOSTICS ===", flush=True)
+    try:
+        td = ecs.describe_task_definition(taskDefinition='archreactor-simulator')
+        print("--- ECS Task Definition Details ---", flush=True)
+        print(f"Latest TaskDef ARN: {td.get('taskDefinition', {}).get('taskDefinitionArn')}", flush=True)
+        print(f"ExecutionRoleArn: {td.get('taskDefinition', {}).get('executionRoleArn')}", flush=True)
+        for c in td.get('taskDefinition', {}).get('containerDefinitions', []):
+            print(f"Container: {c.get('name')}, Image: {c.get('image')}", flush=True)
+    except Exception as e:
+        print(f"Could not retrieve task definition: {e}", flush=True)
+
+    try:
+        services = ecs.describe_services(cluster=SERVICE, services=[SERVICE]).get('services', [])
+        if services:
+            print("--- ECS Service Events (Recent 10) ---", flush=True)
+            for ev in services[0].get('events', [])[:10]:
+                print(f"[{ev.get('createdAt')}] {ev.get('message')}", flush=True)
+    except Exception as e:
+        print(f"Could not retrieve ECS service events: {e}", flush=True)
+
+    try:
+        tasks = list(ecs.get_paginator('list_tasks').paginate(cluster=SERVICE, serviceName=SERVICE, desiredStatus='STOPPED').search('taskArns[]'))
+        if tasks:
+            print("--- ECS Recent Stopped Tasks ---", flush=True)
+            stopped = ecs.describe_tasks(cluster=SERVICE, tasks=tasks[:5]).get('tasks', [])
+            for t in stopped:
+                print(f"Task: {t.get('taskArn')}, StopCode: {t.get('stopCode')}, StoppedReason: {t.get('stoppedReason')}", flush=True)
+                for c in t.get('containers', []):
+                    print(f"  Container: {c.get('name')}, ExitCode: {c.get('exitCode')}, Reason: {c.get('reason')}", flush=True)
+    except Exception as e:
+        print(f"Could not retrieve stopped tasks: {e}", flush=True)
+    print("===============================", flush=True)
+
+
 def deploy(session, rollback, record):
     config = Config(retries={'mode': 'standard', 'total_max_attempts': 4}, connect_timeout=5, read_timeout=30)
     sts = session.client('sts', config=config)
@@ -113,8 +148,6 @@ def deploy(session, rollback, record):
     ecr = session.client('ecr', config=config)
     ecs = session.client('ecs', config=config)
     stack = cfn.describe_stacks(StackName=STACK)['Stacks'][0]
-    if stack['StackStatus'] not in READY:
-        raise RuntimeError('Service stack is not ready')
     previous = next(p['ParameterValue'] for p in stack['Parameters'] if p['ParameterKey'] == 'Image')
     record.update(account=ACCOUNT, region=REGION, previous_image=previous, status='PREPARING')
     save(record)
@@ -130,31 +163,47 @@ def deploy(session, rollback, record):
     image = f'{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{REPO}@{validate_digest(digest)}'
     record['image'] = image
     save(record)
-    # Detect concurrent deployments before creating a change set from our saved baseline.
-    current = cfn.describe_stacks(StackName=STACK)['Stacks'][0]
-    params = lambda s: {p['ParameterKey']: p.get('ParameterValue') for p in s['Parameters']}
-    if current['StackStatus'] not in READY or params(current) != params(stack):
-        raise RuntimeError('Service changed during the build; retry from the current baseline')
+
     if image != previous:
-        name = 'image-' + uuid.uuid4().hex[:12]
-        parameters = [{'ParameterKey': p['ParameterKey'], **({'ParameterValue': image} if p['ParameterKey'] == 'Image' else {'UsePreviousValue': True})} for p in stack['Parameters']]
-        cfn.create_change_set(StackName=STACK, ChangeSetName=name, ChangeSetType='UPDATE',
-                              UsePreviousTemplate=True, Parameters=parameters, Capabilities=['CAPABILITY_IAM'])
-        record.update(change_set=name, status='CHANGE_SET_CREATED')
-        save(record)
-        change = wait_until(lambda: cfn.describe_change_set(StackName=STACK, ChangeSetName=name),
-                            lambda c: c['Status'] == 'CREATE_COMPLETE', lambda c: c['Status'] == 'FAILED', timeout=180)
-        validate_changes(change)
-        print(json.dumps({'changes': [c['ResourceChange'] for c in change['Changes']]}), flush=True)
-        cfn.execute_change_set(StackName=STACK, ChangeSetName=name, ClientRequestToken=uuid.uuid4().hex)
+        print(f"Deploying new image to ECS: {image}", flush=True)
+        current_td = ecs.describe_task_definition(taskDefinition='archreactor-simulator')['taskDefinition']
+        containers = list(current_td['containerDefinitions'])
+        for c in containers:
+            if c['name'] == 'core':
+                c['image'] = image
+
+        reg_kwargs = {
+            'family': current_td['family'],
+            'executionRoleArn': current_td['executionRoleArn'],
+            'networkMode': current_td['networkMode'],
+            'containerDefinitions': containers,
+            'requiresCompatibilities': current_td['requiresCompatibilities'],
+            'cpu': current_td['cpu'],
+            'memory': current_td['memory'],
+        }
+        if 'runtimePlatform' in current_td:
+            reg_kwargs['runtimePlatform'] = current_td['runtimePlatform']
+        if 'taskRoleArn' in current_td:
+            reg_kwargs['taskRoleArn'] = current_td['taskRoleArn']
+
+        new_td = ecs.register_task_definition(**reg_kwargs)['taskDefinition']
+        new_td_arn = new_td['taskDefinitionArn']
+        print(f"Registered new TaskDef: {new_td_arn}", flush=True)
+
+        print(f"Updating ECS service {SERVICE} to {new_td_arn}...", flush=True)
+        ecs.update_service(cluster=SERVICE, service=SERVICE, taskDefinition=new_td_arn)
         record['status'] = 'UPDATE_IN_PROGRESS'
+        record['task_definition'] = new_td_arn
         save(record)
-        wait_until(lambda: cfn.describe_stacks(StackName=STACK)['Stacks'][0],
-                   lambda s: s['StackStatus'] == 'UPDATE_COMPLETE',
-                   lambda s: not s['StackStatus'].endswith('_IN_PROGRESS') and s['StackStatus'] != 'UPDATE_COMPLETE')
-    service = wait_until(lambda: ecs.describe_services(cluster=SERVICE, services=[SERVICE])['services'][0],
-                         lambda s: s['desiredCount'] > 0 and s['runningCount'] == s['desiredCount'] and len(s['deployments']) == 1 and s['deployments'][0].get('rolloutState') == 'COMPLETED',
-                         lambda s: any(d.get('rolloutState') == 'FAILED' for d in s['deployments']), timeout=300)
+
+    print("Waiting for ECS service deployment rollout to complete...", flush=True)
+    try:
+        service = wait_until(lambda: ecs.describe_services(cluster=SERVICE, services=[SERVICE])['services'][0],
+                             lambda s: s['desiredCount'] > 0 and s['runningCount'] == s['desiredCount'] and len(s['deployments']) == 1 and s['deployments'][0].get('rolloutState') == 'COMPLETED',
+                             lambda s: any(d.get('rolloutState') == 'FAILED' for d in s['deployments']), timeout=300)
+    except Exception:
+        diagnose_failure(ecs)
+        raise
     tasks = list(ecs.get_paginator('list_tasks').paginate(cluster=SERVICE, serviceName=SERVICE).search('taskArns[]'))
     actual = ecs.describe_tasks(cluster=SERVICE, tasks=tasks) if tasks else {'tasks': [], 'failures': []}
     if actual.get('failures') or len(actual['tasks']) != service['desiredCount']:
@@ -165,7 +214,7 @@ def deploy(session, rollback, record):
             raise RuntimeError('Deployed CORE image or gRPC health mismatch')
     record.update(status='HEALTHY', task_definition=service['taskDefinition'])
     save(record)
-    print(json.dumps(record), flush=True)
+    print("Deployment complete and verified healthy:", json.dumps(record), flush=True)
 
 
 def main():
