@@ -16,6 +16,72 @@ from archreactor_contract.v1 import simulation_pb2 as pb, simulation_pb2_grpc as
 from service.worker import MAX_ELF, MAX_RESULT
 
 
+def _extract_code_mapping(elf_bytes, result_json):
+    mapping = {}
+    try:
+        data = json.loads(result_json)
+        prog = data.get('program', {})
+        if 'code_mapping' in prog and isinstance(prog['code_mapping'], dict) and prog['code_mapping']:
+            mapping = {k: dict(v) for k, v in prog['code_mapping'].items()}
+        else:
+            for inst in prog.get('instructions', []):
+                pc = inst.get('pc')
+                if pc:
+                    mapping[pc] = {
+                        'assembly': inst.get('assembly', ''),
+                        'raw_instruction': inst.get('raw_instruction', ''),
+                    }
+    except Exception:
+        pass
+
+    try:
+        from io import BytesIO
+        from elftools.elf.elffile import ELFFile
+        stream = BytesIO(elf_bytes)
+        elf = ELFFile(stream)
+        if elf.has_dwarf_info():
+            dwarfinfo = elf.get_dwarf_info()
+            for cu in dwarfinfo.iter_CUs():
+                lineprog = dwarfinfo.line_program_for_CU(cu)
+                if lineprog is None:
+                    continue
+                file_entries = lineprog['file_entry'] if 'file_entry' in lineprog.header else []
+                entries = lineprog.get_entries()
+                prev_state = None
+                for entry in entries:
+                    state = entry.state
+                    if state is None:
+                        continue
+                    if prev_state and not prev_state.end_sequence and prev_state.line > 0:
+                        is_source_c = False
+                        try:
+                            file_idx = prev_state.file - 1
+                            if 0 <= file_idx < len(file_entries):
+                                f_entry = file_entries[file_idx]
+                                fname = f_entry.name.decode('utf-8', errors='ignore') if hasattr(f_entry, 'name') else str(f_entry)
+                                if 'source.c' in fname:
+                                    is_source_c = True
+                            elif not file_entries:
+                                is_source_c = True
+                        except Exception:
+                            is_source_c = True
+                        if is_source_c:
+                            curr_addr = prev_state.address
+                            end_addr = state.address if state.address > curr_addr else curr_addr + 4
+                            while curr_addr < end_addr:
+                                pc_key = f'0x{curr_addr & 0xFFFFFFFF:08X}'
+                                if pc_key in mapping:
+                                    mapping[pc_key]['source_line'] = prev_state.line
+                                else:
+                                    mapping[pc_key] = {'source_line': prev_state.line}
+                                curr_addr += 4
+                    prev_state = state
+    except Exception:
+        pass
+
+    return mapping
+
+
 class Simulator(rpc.SimulatorServicer):
     def __init__(self, concurrency=2, timeout=10.0):
         self.concurrency, self.timeout = concurrency, timeout
@@ -67,8 +133,10 @@ class Simulator(rpc.SimulatorServicer):
             except (ValueError, TypeError, KeyError):
                 pass  # Observability must not turn a successful simulation into an error.
             context.set_trailing_metadata(tuple((key, f'{value:.3f}') for key, value in timings.items()))
+            code_mapping = _extract_code_mapping(request.elf, response.result_json)
             logging.info(json.dumps({'event': 'simulation_complete', 'execution_id': execution_id,
-                                     'status': response.status, 'bytes': len(output), 'timing_ms': timings}))
+                                     'status': response.status, 'bytes': len(output), 'timing_ms': timings,
+                                     'code_mapping': code_mapping}))
             return response
         except asyncio.TimeoutError:
             await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, 'Simulation deadline exceeded')
