@@ -27,6 +27,7 @@ def tick(state: dict) -> dict | None:
     entry["rs2_val"] = state["regs"][decoded["rs2"]]
     activity["ID"] = _snapshot_stage("ID", entry)
 
+    prev_pc = pc
     state["pc"] = (pc + 4) & 0xFFFFFFFF
     _execute_instruction(state, entry, events, pipelined=False)
     activity["EX"] = _snapshot_stage("EX", entry)
@@ -48,4 +49,4 @@ def tick(state: dict) -> dict | None:
 
     if state["status"] != "error" and state["pc"] not in state["imem"]:
         state["status"] = "halted"
-    return _record_cycle(state, activity, events, single=True)
+    return _record_cycle(state, activity, events, single=True, single_entry=entry, prev_pc=prev_pc)

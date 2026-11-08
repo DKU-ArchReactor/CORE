@@ -211,8 +211,134 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate:
             except Exception:
                 pass
 
+    state["program_metadata"]["memory_layout"] = _build_memory_layout(
+        state["program_metadata"]["memory_regions"],
+        state["program_metadata"]["code_mapping"],
+        entry_point,
+    )
+
     GLOBAL_DICT[user_id] = state
     return state
+
+
+def _build_memory_layout(sections: list[dict], code_mapping: dict, entry_point: int) -> dict:
+    """ELF 섹션과 DWARF 심볼을 종합하여 6대 가상 메모리 레이아웃 단일 진실 공급원(SSOT)을 구축한다."""
+    code_sec = next((s for s in sections if s.get("kind") == "code"), None)
+    data_sec = next((s for s in sections if s.get("kind") == "data"), None)
+    bss_sec = next((s for s in sections if s.get("kind") == "bss"), None)
+
+    code_start = code_sec["start"] if code_sec else "0x00010000"
+    code_end = code_sec["end_exclusive"] if code_sec else "0x00010000"
+    code_size = (int(code_end, 16) - int(code_start, 16)) if code_sec else 0
+
+    data_start = data_sec["start"] if data_sec else "0x10000000"
+    data_end = data_sec["end_exclusive"] if data_sec else data_start
+    data_size = (int(data_end, 16) - int(data_start, 16)) if data_sec else 0
+
+    bss_start = bss_sec["start"] if bss_sec else data_end
+    bss_end = bss_sec["end_exclusive"] if bss_sec else bss_start
+    bss_size = (int(bss_end, 16) - int(bss_start, 16)) if bss_sec else 0
+
+    user_pcs = [
+        pc for pc, info in sorted(code_mapping.items(), key=lambda kv: int(kv[0], 16))
+        if info.get("source_line") is not None
+    ]
+    startup_pcs = [
+        pc for pc, info in sorted(code_mapping.items(), key=lambda kv: int(kv[0], 16))
+        if info.get("source_line") is None
+    ]
+
+    if user_pcs:
+        user_start = user_pcs[0]
+        user_end = user_pcs[-1]
+        user_end_exclusive = f"0x{int(user_end, 16) + 4:08X}"
+        user_count = len(user_pcs)
+        entry_pt = user_start
+    else:
+        user_start = f"0x{entry_point:08X}"
+        user_end = code_end
+        user_end_exclusive = code_end
+        user_count = len(code_mapping)
+        entry_pt = user_start
+
+    if startup_pcs and user_pcs:
+        startup_start = startup_pcs[0]
+        startup_end = startup_pcs[-1]
+        startup_end_exclusive = f"0x{int(startup_end, 16) + 4:08X}"
+        startup_count = len(startup_pcs)
+    elif startup_pcs and not user_pcs:
+        startup_start = startup_pcs[0]
+        startup_end = startup_pcs[-1]
+        startup_end_exclusive = f"0x{int(startup_end, 16) + 4:08X}"
+        startup_count = len(startup_pcs)
+    else:
+        startup_start = "0x00010000"
+        startup_end = "0x00010014"
+        startup_end_exclusive = "0x00010014"
+        startup_count = 0
+
+    return {
+        "stack": {
+            "name": "Stack",
+            "base": f"0x{DEFAULT_STACK_POINTER:08X}",
+            "limit": "0x10008000",
+            "growth": "down",
+        },
+        "heap": {
+            "name": "Heap",
+            "base": "0x10004000",
+            "limit": "0x10008000",
+            "growth": "up",
+        },
+        "bss": {
+            "name": "BSS",
+            "start": bss_start,
+            "end_exclusive": bss_end,
+            "size_bytes": bss_size,
+        },
+        "data": {
+            "name": "Data",
+            "start": data_start,
+            "end_exclusive": data_end,
+            "size_bytes": data_size,
+        },
+        "code": {
+            "name": "Code",
+            "start": code_start,
+            "end_exclusive": code_end,
+            "size_bytes": code_size,
+            "runtime_startup": {
+                "name": "System Runtime Startup (_start)",
+                "start": startup_start,
+                "end": startup_end,
+                "end_exclusive": startup_end_exclusive,
+                "instruction_count": startup_count,
+            },
+            "user_program": {
+                "name": "User Program (main)",
+                "start": user_start,
+                "end": user_end,
+                "end_exclusive": user_end_exclusive,
+                "instruction_count": user_count,
+                "entry_point": entry_pt,
+            },
+        },
+        "reserved": {
+            "name": "NULL",
+            "start": "0x00000000",
+            "end_exclusive": "0x00010000",
+            "size_bytes": 65536,
+            "desc": "NULL Pointer Guard (접근 금지 보호 구역)",
+        },
+        "boundary_dividers": [
+            "0x10008000",
+            "0x10004000",
+            bss_start if bss_size > 0 else "0x10000000",
+            data_start if data_size > 0 else "0x10000000",
+            "0x00010000",
+            "0x00000000",
+        ],
+    }
 
 
 def get_state(user_id: str) -> Optional[dict]:

@@ -33,6 +33,7 @@ def _snapshot_global(state: dict) -> Dict[str, object]:
         "current_pc": _hex32(state["pc"]),
         "registers": registers,
         "memory_snapshot": memory_snapshot,
+        "active_stack_pointer": _hex32(state["regs"][2]),
         "console_output": state["console_output"],
         "metrics": {
             "accumulated_instructions": state["stats"]["instructions_executed"],
@@ -449,7 +450,108 @@ def _execute_instruction(state: dict, ex_entry: dict, cycle_events: dict, *, pip
     return branch_flush
 
 
-def _record_cycle(state: dict, stage_activity: dict, cycle_events: dict, *, single: bool = False) -> dict:
+def _build_single_cycle_datapath(entry: dict, state: dict, pc: int) -> dict:
+    """단일 사이클 데이터패스 경로별 실제 값 및 제어 신호(Control Signals) 상태를 기록한다."""
+    decoded = entry["decoded"]
+    alu = entry.get("alu") or {
+        "alu_op": decoded.get("op", "unknown"),
+        "operand1": entry.get("rs1_val", 0) or 0,
+        "operand2": decoded.get("imm", 0) or 0,
+        "alu_result": 0,
+    }
+    rs1_num = decoded["rs1"]
+    rs2_num = decoded["rs2"]
+    rd_num = decoded["rd"]
+
+    is_r_type = decoded.get("op") in (
+        "add", "sub", "and", "or", "xor", "sll", "srl", "sra", "slt", "sltu",
+        "mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu",
+    )
+    is_branch = bool(decoded.get("branch"))
+    alu_src = "reg" if (is_r_type or is_branch) else "imm"
+
+    mem_read = bool(decoded.get("mem_read"))
+    mem_write = bool(decoded.get("mem_write"))
+    mem_to_reg = mem_read
+    reg_write = bool(decoded.get("reg_write") and rd_num != 0)
+
+    fallthrough = (pc + 4) & 0xFFFFFFFF
+    if is_branch:
+        pc_src = "branch_target" if state["pc"] != fallthrough else "pc+4"
+    elif decoded.get("jump"):
+        pc_src = "jump_target"
+    else:
+        pc_src = "pc+4"
+
+    read_data_1 = entry.get("rs1_val") if entry.get("rs1_val") is not None else 0
+    read_data_2 = entry.get("rs2_val") if entry.get("rs2_val") is not None else 0
+    imm_val = decoded.get("imm", 0) or 0
+    alu_res = alu.get("alu_result", 0)
+    write_val = entry.get("write_val")
+
+    return {
+        "pc": _hex32(pc),
+        "next_pc": _hex32(state["pc"]),
+        "pc_plus_4": _hex32(fallthrough),
+        "instruction": {
+            "raw": _hex32(entry["raw_instruction"]),
+            "assembly": decoded.get("assembly", "unknown"),
+            "op": decoded.get("op", "unknown"),
+        },
+        "control_signals": {
+            "reg_write": reg_write,
+            "alu_src": alu_src,
+            "alu_op": alu.get("alu_op", decoded.get("op", "unknown")),
+            "mem_read": mem_read,
+            "mem_write": mem_write,
+            "mem_to_reg": mem_to_reg,
+            "branch": is_branch,
+            "jump": bool(decoded.get("jump")),
+            "pc_src": pc_src,
+        },
+        "registers": {
+            "rs1": {
+                "name": register_name(rs1_num),
+                "num": rs1_num,
+                "value": _hex32(read_data_1),
+                "dec": _to_s32(read_data_1),
+            },
+            "rs2": {
+                "name": register_name(rs2_num),
+                "num": rs2_num,
+                "value": _hex32(read_data_2),
+                "dec": _to_s32(read_data_2),
+            },
+            "rd": {
+                "name": register_name(rd_num),
+                "num": rd_num,
+                "write_enabled": reg_write,
+                "write_data": _hex32(write_val) if (reg_write and write_val is not None) else None,
+            },
+        },
+        "immediate": {
+            "value": _hex32(imm_val),
+            "dec": imm_val,
+        },
+        "alu": {
+            "op": alu.get("alu_op", decoded.get("op", "unknown")),
+            "input_1": _hex32(alu.get("operand1", read_data_1)),
+            "input_2": _hex32(alu.get("operand2", imm_val if alu_src == "imm" else read_data_2)),
+            "result": _hex32(alu_res),
+            "result_dec": _to_s32(alu_res),
+            "zero": bool(alu_res == 0),
+        },
+        "data_memory": {
+            "enabled": bool(mem_read or mem_write),
+            "operation": "load" if mem_read else ("store" if mem_write else "none"),
+            "address": _hex32(alu_res) if (mem_read or mem_write) else None,
+            "read_data": _hex32(entry.get("mem_read_data") or 0) if mem_read else None,
+            "write_data": _hex32(entry.get("mem_write_data") or 0) if mem_write else None,
+        },
+    }
+
+
+def _record_cycle(state: dict, stage_activity: dict, cycle_events: dict, *, single: bool = False, single_entry: Optional[dict] = None, prev_pc: Optional[int] = None) -> dict:
     snapshot = {
         "clock": state["stats"]["total_cycles"],
         "buffers": {stage: _buffer_snapshot(entry) for stage, entry in state["pipeline_regs"].items()},
@@ -457,6 +559,8 @@ def _record_cycle(state: dict, stage_activity: dict, cycle_events: dict, *, sing
         "cycle_events": cycle_events,
         "global_result": _snapshot_global(state),
     }
+    if single and single_entry is not None and prev_pc is not None:
+        snapshot["datapath"] = _build_single_cycle_datapath(single_entry, state, prev_pc)
     for stage in ("IF", "ID", "EX", "MEM", "WB"):
         snapshot[f"{stage.lower()}_stage"] = (
             stage_activity[stage] if single else _snapshot_stage(stage, state["pipeline_regs"][stage])
