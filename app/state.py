@@ -172,44 +172,12 @@ def create_state(user_id: str, elf_bytes: bytes, mode: str = "single", validate:
                     "end_exclusive": f"0x{start + section['sh_size']:08X}",
                     "kind": "code" if section["sh_flags"] & 4 else ("bss" if section["sh_type"] == "SHT_NOBITS" else "data"),
                 })
-        if elf.has_dwarf_info():
-            try:
-                dwarfinfo = elf.get_dwarf_info()
-                for cu in dwarfinfo.iter_CUs():
-                    lineprog = dwarfinfo.line_program_for_CU(cu)
-                    if lineprog is None:
-                        continue
-                    file_entries = lineprog["file_entry"] if "file_entry" in lineprog.header else []
-                    entries = lineprog.get_entries()
-                    prev_state = None
-                    for entry in entries:
-                        st = entry.state
-                        if st is None:
-                            continue
-                        if prev_state and not prev_state.end_sequence and prev_state.line > 0:
-                            is_source_c = False
-                            try:
-                                file_idx = prev_state.file - 1
-                                if 0 <= file_idx < len(file_entries):
-                                    f_entry = file_entries[file_idx]
-                                    fname = f_entry.name.decode("utf-8", errors="ignore") if hasattr(f_entry, "name") else str(f_entry)
-                                    if "source.c" in fname:
-                                        is_source_c = True
-                                elif not file_entries:
-                                    is_source_c = True
-                            except Exception:
-                                is_source_c = True
-                            if is_source_c:
-                                curr_addr = prev_state.address
-                                end_addr = st.address if st.address > curr_addr else curr_addr + 4
-                                while curr_addr < end_addr:
-                                    pc_key = f"0x{curr_addr & 0xFFFFFFFF:08X}"
-                                    if pc_key in state["program_metadata"]["code_mapping"]:
-                                        state["program_metadata"]["code_mapping"][pc_key]["source_line"] = prev_state.line
-                                    curr_addr += 4
-                        prev_state = st
-            except Exception:
-                pass
+        try:
+            from app.source_mapping import enrich_source_mapping
+            enrich_source_mapping(elf, state["program_metadata"]["code_mapping"])
+        except Exception:
+            # Source metadata is optional; never invent a source line on failure.
+            pass
 
     state["program_metadata"]["memory_layout"] = _build_memory_layout(
         state["program_metadata"]["memory_regions"],
